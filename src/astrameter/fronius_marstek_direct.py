@@ -37,13 +37,6 @@ def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
     return max(-max_power, min(max_power, round(p_grid)))
 
 
-def retry_delay(failures: int, interval: float, maximum: float = 120.0) -> float:
-    """Back off after API errors so the Marstek UDP service can recover."""
-    if failures <= 0:
-        return max(0.2, interval)
-    return min(maximum, max(interval, 10.0 * (2 ** (failures - 1))))
-
-
 def extract_p_grid(payload: dict[str, Any]) -> float:
     """Extract and validate P_Grid from a Fronius Solar API response."""
     status = payload.get("Head", {}).get("Status", {})
@@ -258,8 +251,7 @@ def run(args: argparse.Namespace) -> int:
             LOGGER.warning("Control cycle failed (%d): %s", failures, exc)
         if args.once:
             break
-        delay = retry_delay(failures, args.interval)
-        stop_event.wait(max(0.2, delay - (time.monotonic() - started)))
+        stop_event.wait(max(0.2, args.interval - (time.monotonic() - started)))
 
     if not args.dry_run and client.ip:
         try:
