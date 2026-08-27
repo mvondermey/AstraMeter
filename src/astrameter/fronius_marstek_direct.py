@@ -220,7 +220,6 @@ def run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     client = MarstekClient(args.device_id, args.port, args.state_file)
     failures = 0
-    last_power: int | None = None
     needs_probe = False
 
     try:
@@ -263,11 +262,15 @@ def run(args: argparse.Namespace) -> int:
                         raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
                     if not accepted:
                         raise RuntimeError("Marstek rejected ES.SetMode")
-                    if target != last_power:
-                        LOGGER.info("P_Grid=%.0fW -> Marstek=%dW", p_grid, target)
-                    else:
-                        LOGGER.debug("P_Grid=%.0fW -> Marstek=%dW", p_grid, target)
-                    last_power = target
+                    LOGGER.info(
+                        "cycle ok P_Grid=%.0fW mode=%s previous_output=%sW "
+                        "target=%dW soc=%s%%",
+                        p_grid,
+                        mode_status["mode"],
+                        mode_status.get("ongrid_power"),
+                        target,
+                        mode_status.get("bat_soc"),
+                    )
                 failures = 0
         except (
             OSError,
