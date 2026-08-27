@@ -6,6 +6,7 @@ from .fronius_marstek_direct import (
     calculate_target,
     device_matches,
     extract_p_grid,
+    retry_delay,
 )
 
 
@@ -20,6 +21,13 @@ def test_calculate_target_sign_deadband_and_limit() -> None:
 def test_calculate_target_rejects_non_finite() -> None:
     with pytest.raises(ValueError):
         calculate_target(float("nan"), 50, 2500)
+
+
+def test_retry_delay_backs_off_and_is_capped() -> None:
+    assert retry_delay(0, 5) == 5
+    assert retry_delay(1, 5) == 10
+    assert retry_delay(2, 5) == 20
+    assert retry_delay(5, 5) == 120
 
 
 def test_extract_p_grid() -> None:
