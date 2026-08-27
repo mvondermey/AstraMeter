@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger("astrameter.direct")
-DISCOVERY_METHOD = "Marstek.GetDevice"
 SET_MODE_METHOD = "ES.SetMode"
 
 
@@ -93,9 +92,6 @@ class MarstekClient:
         except (OSError, ValueError):
             return None
 
-    def _save_ip(self, value: str) -> None:
-        self.state_file.write_text(value, encoding="utf-8")
-
     def _next_id(self) -> int:
         self._request_id = (self._request_id + 1) % 2_147_483_647
         return self._request_id
@@ -123,50 +119,14 @@ class MarstekClient:
                 if payload.get("id") == request_id:
                     return payload
 
-    def discover(self) -> str:
-        """Find the configured battery after DHCP changes its IP address."""
-        request_id = self._next_id()
-        message = json.dumps(
-            {
-                "id": request_id,
-                "method": DISCOVERY_METHOD,
-                "params": {"ble_mac": "0"},
-            },
-            separators=(",", ":"),
-        ).encode()
-        deadline = time.monotonic() + 3.0
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.settimeout(0.5)
-            sock.sendto(message, ("255.255.255.255", self.port))
-            while time.monotonic() < deadline:
-                try:
-                    data, address = sock.recvfrom(65535)
-                except TimeoutError:
-                    continue
-                try:
-                    payload = json.loads(data.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                if device_matches(payload, self.device_id):
-                    discovered = str(payload.get("result", {}).get("ip") or address[0])
-                    self.ip = str(ipaddress.ip_address(discovered))
-                    self._save_ip(self.ip)
-                    return self.ip
-        raise TimeoutError(f"Marstek {self.device_id} was not found by UDP discovery")
-
     def ensure_ip(self) -> str:
-        """Reuse the last DHCP address when valid, otherwise discover it."""
-        if self.ip:
-            try:
-                reply = self.request("Wifi.GetStatus", {"id": 0})
-                if device_matches(reply, self.device_id):
-                    return self.ip
-            except (OSError, ValueError, json.JSONDecodeError):
-                pass
-            self.ip = None
-            time.sleep(0.4)
-        return self.discover()
+        """Validate the cached address without broadcasting on the LAN."""
+        if not self.ip:
+            raise ConnectionError("Marstek IP is not known; state file is empty")
+        reply = self.request("Wifi.GetStatus", {"id": 0})
+        if not device_matches(reply, self.device_id):
+            raise ConnectionError(f"Unexpected device at {self.ip}")
+        return self.ip
 
     def set_passive(self, power: int, duration: int) -> bool:
         config = {
@@ -230,6 +190,7 @@ def run(args: argparse.Namespace) -> int:
     client = MarstekClient(args.device_id, args.port, args.state_file)
     failures = 0
     last_power: int | None = None
+    needs_probe = False
 
     try:
         marstek_ip = client.ensure_ip()
@@ -238,27 +199,31 @@ def run(args: argparse.Namespace) -> int:
         # Leave a full device processing window after the startup identity check.
         time.sleep(5.0)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        LOGGER.warning("Initial Marstek discovery failed: %s", exc)
+        LOGGER.warning("Initial Marstek validation failed: %s", exc)
+        needs_probe = True
 
     while not stop_event.is_set():
         started = time.monotonic()
         try:
-            p_grid = read_fronius(args.fronius_host)
-            target = calculate_target(p_grid, args.deadband, args.max_power)
-            if args.dry_run:
-                LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
+            if needs_probe:
+                client.ensure_ip()
+                LOGGER.info("Marstek API probe succeeded; writing resumes next cycle")
+                needs_probe = False
+                failures = 0
             else:
-                if not client.ip:
-                    client.discover()
-                    time.sleep(0.4)
-                if not client.set_passive(target, args.command_ttl):
-                    raise RuntimeError("Marstek rejected ES.SetMode")
-                if target != last_power:
-                    LOGGER.info("P_Grid=%.0fW -> Marstek=%dW", p_grid, target)
+                p_grid = read_fronius(args.fronius_host)
+                target = calculate_target(p_grid, args.deadband, args.max_power)
+                if args.dry_run:
+                    LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
                 else:
-                    LOGGER.debug("P_Grid=%.0fW -> Marstek=%dW", p_grid, target)
-                last_power = target
-            failures = 0
+                    if not client.set_passive(target, args.command_ttl):
+                        raise RuntimeError("Marstek rejected ES.SetMode")
+                    if target != last_power:
+                        LOGGER.info("P_Grid=%.0fW -> Marstek=%dW", p_grid, target)
+                    else:
+                        LOGGER.debug("P_Grid=%.0fW -> Marstek=%dW", p_grid, target)
+                    last_power = target
+                failures = 0
         except (
             OSError,
             ValueError,
@@ -267,9 +232,8 @@ def run(args: argparse.Namespace) -> int:
             RuntimeError,
         ) as exc:
             failures += 1
+            needs_probe = True
             LOGGER.warning("Control cycle failed (%d): %s", failures, exc)
-            if failures >= 3:
-                client.ip = None
         if args.once:
             break
         delay = retry_delay(failures, args.interval)

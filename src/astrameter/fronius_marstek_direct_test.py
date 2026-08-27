@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from .fronius_marstek_direct import (
+    MarstekClient,
     calculate_target,
     device_matches,
     extract_p_grid,
@@ -28,6 +29,22 @@ def test_retry_delay_backs_off_and_is_capped() -> None:
     assert retry_delay(1, 5) == 10
     assert retry_delay(2, 5) == 20
     assert retry_delay(5, 5) == 120
+
+
+def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    client = MarstekClient("5037cd7f1d02", 30000, state_file)
+    calls = []
+
+    def fake_request(method, params, target=None):
+        calls.append((method, params, target))
+        return {"src": "VenusE 3.0-5037cd7f1d02", "result": {}}
+
+    monkeypatch.setattr(client, "request", fake_request)
+
+    assert client.ensure_ip() == "192.168.1.95"
+    assert calls == [("Wifi.GetStatus", {"id": 0}, None)]
 
 
 def test_extract_p_grid() -> None:
