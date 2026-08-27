@@ -2,7 +2,7 @@
 
 ## Next
 
-- **Fixed** direct installations failing to start on Windows because the application attempted to register a Unix-only restart signal.
+- **Fixed** direct Windows operation and added a safe Fronius load-meter bridge that includes the locally reported Marstek battery power, preventing the battery from ramping to maximum output when Fronius cannot see its AC flow.
 
 ## 2.2.4
 
