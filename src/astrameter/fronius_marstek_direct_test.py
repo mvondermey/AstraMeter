@@ -47,6 +47,46 @@ def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:
     assert calls == [("Wifi.GetStatus", {"id": 0}, None)]
 
 
+def test_get_mode_validates_device_and_result(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    client = MarstekClient("5037cd7f1d02", 30000, state_file)
+
+    monkeypatch.setattr(
+        client,
+        "request",
+        lambda method, params: {
+            "src": "VenusE 3.0-5037cd7f1d02",
+            "result": {
+                "id": 0,
+                "mode": "Passive",
+                "ongrid_power": 700,
+                "bat_soc": 48,
+            },
+        },
+    )
+
+    assert client.get_mode()["ongrid_power"] == 700
+
+
+def test_get_mode_rejects_invalid_mode(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    client = MarstekClient("5037cd7f1d02", 30000, state_file)
+
+    monkeypatch.setattr(
+        client,
+        "request",
+        lambda method, params: {
+            "src": "VenusE 3.0-5037cd7f1d02",
+            "result": {"id": 0, "mode": None},
+        },
+    )
+
+    with pytest.raises(ValueError, match="invalid mode"):
+        client.get_mode()
+
+
 def test_extract_p_grid() -> None:
     payload = {
         "Head": {"Status": {"Code": 0}},

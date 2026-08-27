@@ -24,6 +24,8 @@ from typing import Any
 
 LOGGER = logging.getLogger("astrameter.direct")
 SET_MODE_METHOD = "ES.SetMode"
+GET_MODE_METHOD = "ES.GetMode"
+VALID_MODES = {"auto", "ai", "manual", "passive", "ups"}
 
 
 def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
@@ -136,6 +138,19 @@ class MarstekClient:
         reply = self.request(SET_MODE_METHOD, {"id": 0, "config": config})
         return reply.get("result", {}).get("set_result") is True
 
+    def get_mode(self) -> dict[str, Any]:
+        """Read and validate mode state before issuing a write command."""
+        reply = self.request(GET_MODE_METHOD, {"id": 0})
+        if not device_matches(reply, self.device_id):
+            raise ConnectionError("ES.GetMode response came from an unexpected device")
+        result = reply.get("result")
+        if not isinstance(result, dict) or result.get("id") != 0:
+            raise ValueError("ES.GetMode returned an invalid result")
+        mode = result.get("mode")
+        if not isinstance(mode, str) or mode.lower() not in VALID_MODES:
+            raise ValueError(f"ES.GetMode returned an invalid mode: {mode!r}")
+        return result
+
 
 def read_fronius(host: str, timeout: float = 3.0) -> float:
     url = f"http://{host}/solar_api/v1/GetPowerFlowRealtimeData.fcgi"
@@ -216,6 +231,13 @@ def run(args: argparse.Namespace) -> int:
                 if args.dry_run:
                     LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
                 else:
+                    mode_status = client.get_mode()
+                    LOGGER.debug(
+                        "ES.GetMode mode=%s ongrid_power=%sW soc=%s%%",
+                        mode_status["mode"],
+                        mode_status.get("ongrid_power"),
+                        mode_status.get("bat_soc"),
+                    )
                     if not client.set_passive(target, args.command_ttl):
                         raise RuntimeError("Marstek rejected ES.SetMode")
                     if target != last_power:
