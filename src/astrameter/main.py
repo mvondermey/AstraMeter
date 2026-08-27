@@ -901,7 +901,11 @@ def main():
         restart_requested = True
         signal.default_int_handler(signum, frame)
 
-    signal.signal(signal.SIGUSR1, _restart_handler)
+    # SIGUSR1 is not available on Windows. The restart endpoint is only used by
+    # the optional web configuration UI, so normal Windows operation can run
+    # without registering this Unix-only signal.
+    if hasattr(signal, "SIGUSR1"):
+        signal.signal(signal.SIGUSR1, _restart_handler)
 
     while True:
         restart_requested = False
