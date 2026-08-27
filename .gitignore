@@ -13,4 +13,6 @@ test-results.xml
 coverage.xml
 config.ini
 .fronius-marstek-last-power
+.marstek-direct-ip
+fronius-marstek-direct.log*
 .DS_Store
