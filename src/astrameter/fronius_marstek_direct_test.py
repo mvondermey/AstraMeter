@@ -7,6 +7,7 @@ from .fronius_marstek_direct import (
     calculate_target,
     device_matches,
     extract_p_grid,
+    required_request_delay,
 )
 
 
@@ -21,6 +22,13 @@ def test_calculate_target_sign_deadband_and_limit() -> None:
 def test_calculate_target_rejects_non_finite() -> None:
     with pytest.raises(ValueError):
         calculate_target(float("nan"), 50, 2500)
+
+
+def test_required_request_delay() -> None:
+    assert required_request_delay(0, 10, 5) == 0
+    assert required_request_delay(10, 12, 5) == 3
+    assert required_request_delay(10, 15, 5) == 0
+    assert required_request_delay(10, 20, 5) == 0
 
 
 def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:

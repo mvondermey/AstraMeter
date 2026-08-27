@@ -26,6 +26,7 @@ LOGGER = logging.getLogger("astrameter.direct")
 SET_MODE_METHOD = "ES.SetMode"
 GET_MODE_METHOD = "ES.GetMode"
 VALID_MODES = {"auto", "ai", "manual", "passive", "ups"}
+MIN_REQUEST_GAP = 5.0
 
 
 def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
@@ -35,6 +36,15 @@ def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
     if abs(p_grid) < deadband:
         return 0
     return max(-max_power, min(max_power, round(p_grid)))
+
+
+def required_request_delay(
+    last_finished: float, now: float, minimum_gap: float
+) -> float:
+    """Return the remaining quiet time before another Marstek API request."""
+    if last_finished <= 0:
+        return 0.0
+    return max(0.0, minimum_gap - (now - last_finished))
 
 
 def extract_p_grid(payload: dict[str, Any]) -> float:
@@ -72,13 +82,16 @@ class MarstekClient:
         port: int,
         state_file: Path,
         timeout: float = 1.5,
+        minimum_request_gap: float = MIN_REQUEST_GAP,
     ) -> None:
         self.device_id = device_id
         self.port = port
         self.state_file = state_file
         self.timeout = timeout
+        self.minimum_request_gap = minimum_request_gap
         self.ip: str | None = self._load_last_ip()
         self._request_id = 0
+        self._last_request_finished = 0.0
 
     def _load_last_ip(self) -> str | None:
         try:
@@ -100,19 +113,29 @@ class MarstekClient:
         destination = target or self.ip
         if not destination:
             raise ConnectionError("Marstek IP is not known")
+        delay = required_request_delay(
+            self._last_request_finished,
+            time.monotonic(),
+            self.minimum_request_gap,
+        )
+        if delay:
+            time.sleep(delay)
         request_id = self._next_id()
         message = json.dumps(
             {"id": request_id, "method": method, "params": params},
             separators=(",", ":"),
         ).encode()
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(self.timeout)
-            sock.sendto(message, (destination, self.port))
-            while True:
-                data, _address = sock.recvfrom(65535)
-                payload = json.loads(data.decode("utf-8"))
-                if payload.get("id") == request_id:
-                    return payload
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(self.timeout)
+                sock.sendto(message, (destination, self.port))
+                while True:
+                    data, _address = sock.recvfrom(65535)
+                    payload = json.loads(data.decode("utf-8"))
+                    if payload.get("id") == request_id:
+                        return payload
+        finally:
+            self._last_request_finished = time.monotonic()
 
     def ensure_ip(self) -> str:
         """Validate the cached address without broadcasting on the LAN."""
@@ -224,14 +247,21 @@ def run(args: argparse.Namespace) -> int:
                 if args.dry_run:
                     LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
                 else:
-                    mode_status = client.get_mode()
+                    try:
+                        mode_status = client.get_mode()
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        raise RuntimeError(f"ES.GetMode failed: {exc}") from exc
                     LOGGER.debug(
                         "ES.GetMode mode=%s ongrid_power=%sW soc=%s%%",
                         mode_status["mode"],
                         mode_status.get("ongrid_power"),
                         mode_status.get("bat_soc"),
                     )
-                    if not client.set_passive(target, args.command_ttl):
+                    try:
+                        accepted = client.set_passive(target, args.command_ttl)
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
+                    if not accepted:
                         raise RuntimeError("Marstek rejected ES.SetMode")
                     if target != last_power:
                         LOGGER.info("P_Grid=%.0fW -> Marstek=%dW", p_grid, target)
