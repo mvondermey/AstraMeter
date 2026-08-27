@@ -2,7 +2,7 @@
 
 ## Next
 
-- **Fixed** direct installations failing to start on Windows because the application attempted to register a Unix-only restart signal.
+- **Fixed** direct Windows operation and Fronius load-position meter feedback by including the Marstek's locally reported AC power, allowing phase diagnosis to see the battery's test pulse.
 
 ## 2.2.4
 
