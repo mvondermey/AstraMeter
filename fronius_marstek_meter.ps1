@@ -7,6 +7,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $statePath = Join-Path $PSScriptRoot '.fronius-marstek-last-power'
+$diagnosticUntilPath = Join-Path $PSScriptRoot '.fronius-marstek-diagnostic-until'
+
+function Get-FroniusGrid {
+    param([string]$HostName)
+
+    $fronius = Invoke-RestMethod `
+        -Uri "http://$HostName/solar_api/v1/GetPowerFlowRealtimeData.fcgi" `
+        -TimeoutSec 1
+    if ($fronius.Head.Status.Code -ne 0) {
+        throw "Fronius API status $($fronius.Head.Status.Code)"
+    }
+    return [double]$fronius.Body.Data.Site.P_Grid
+}
 
 function Get-MarstekStatus {
     param([string]$HostName, [int]$Port)
@@ -50,6 +63,27 @@ try {
     )
 }
 catch {
+    $diagnosticUntil = 0L
+    if (Test-Path -LiteralPath $diagnosticUntilPath) {
+        [void][long]::TryParse(
+            (Get-Content -Raw -LiteralPath $diagnosticUntilPath).Trim(),
+            [ref]$diagnosticUntil
+        )
+    }
+    if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -le $diagnosticUntil) {
+        try {
+            $diagnosticGrid = Get-FroniusGrid -HostName $FroniusHost
+            $diagnosticGrid.ToString(
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            exit 0
+        }
+        catch {
+            '0'
+            exit 0
+        }
+    }
+
     # A raw Fronius load reading without the battery correction caused the
     # Venus to ramp to its 2500 W limit. On one missed local-API read, report
     # the opposite of the last known battery output once; this makes the
@@ -69,13 +103,7 @@ catch {
 }
 
 try {
-    $fronius = Invoke-RestMethod `
-        -Uri "http://$FroniusHost/solar_api/v1/GetPowerFlowRealtimeData.fcgi" `
-        -TimeoutSec 1
-    if ($fronius.Head.Status.Code -ne 0) {
-        throw "Fronius API status $($fronius.Head.Status.Code)"
-    }
-    $froniusGrid = [double]$fronius.Body.Data.Site.P_Grid
+    $froniusGrid = Get-FroniusGrid -HostName $FroniusHost
 
     # With the Fronius meter at the load position, P_Grid excludes the Venus.
     # Venus ongrid_power is positive while discharging and negative while

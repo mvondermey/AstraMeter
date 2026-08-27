@@ -2,7 +2,7 @@
 
 ## Next
 
-- **Fixed** direct Windows operation and added a safe Fronius load-meter bridge that includes the locally reported Marstek battery power, preventing the battery from ramping to maximum output when Fronius cannot see its AC flow.
+- **Fixed** direct Windows operation and added a safe Fronius load-meter bridge that supports Marstek phase diagnosis, includes the locally reported battery power, and prevents uncontrolled maximum output when Fronius cannot see its AC flow.
 
 ## 2.2.4
 
