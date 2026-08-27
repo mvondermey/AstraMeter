@@ -12,6 +12,4 @@ htmlcov/
 test-results.xml
 coverage.xml
 config.ini
-.fronius-marstek-last-power
-.fronius-marstek-diagnostic-until
 .DS_Store

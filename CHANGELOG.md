@@ -2,7 +2,7 @@
 
 ## Next
 
-- **Fixed** direct Windows operation and added a safe Fronius load-meter bridge that supports Marstek phase diagnosis, includes the locally reported battery power, and prevents uncontrolled maximum output when Fronius cannot see its AC flow.
+- **Fixed** direct installations failing to start on Windows because the application attempted to register a Unix-only restart signal.
 
 ## 2.2.4
 
