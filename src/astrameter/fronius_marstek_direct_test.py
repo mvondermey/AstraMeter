@@ -5,6 +5,7 @@ import pytest
 from . import fronius_marstek_direct as direct
 from .fronius_marstek_direct import (
     MarstekClient,
+    apply_min_soc_guard,
     calculate_target,
     device_matches,
     extract_p_grid,
@@ -23,6 +24,14 @@ def test_calculate_target_sign_deadband_and_limit() -> None:
 def test_calculate_target_rejects_non_finite() -> None:
     with pytest.raises(ValueError):
         calculate_target(float("nan"), 50, 2500)
+
+
+def test_apply_min_soc_guard_only_blocks_discharge() -> None:
+    assert apply_min_soc_guard(600, 12, 12) == 0
+    assert apply_min_soc_guard(600, 11, 12) == 0
+    assert apply_min_soc_guard(600, 13, 12) == 600
+    assert apply_min_soc_guard(-600, 12, 12) == -600
+    assert apply_min_soc_guard(0, 12, 12) == 0
 
 
 def test_required_request_delay() -> None:

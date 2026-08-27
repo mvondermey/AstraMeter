@@ -39,6 +39,13 @@ def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
     return max(-max_power, min(max_power, round(p_grid)))
 
 
+def apply_min_soc_guard(target: int, soc: float, minimum_soc: float) -> int:
+    """Prevent discharge requests at or below the configured reserve SOC."""
+    if target > 0 and soc <= minimum_soc:
+        return 0
+    return target
+
+
 def required_request_delay(
     last_finished: float, now: float, minimum_gap: float
 ) -> float:
@@ -181,6 +188,9 @@ class MarstekClient:
         mode = result.get("mode")
         if not isinstance(mode, str) or mode.lower() not in VALID_MODES:
             raise ValueError(f"ES.GetMode returned an invalid mode: {mode!r}")
+        soc = result.get("bat_soc")
+        if not isinstance(soc, (int, float)) or not 0 <= soc <= 100:
+            raise ValueError(f"ES.GetMode returned an invalid SOC: {soc!r}")
         return result
 
 
@@ -214,7 +224,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--deadband", type=int, default=50)
     parser.add_argument("--max-power", type=int, default=2500)
-    parser.add_argument("--command-ttl", type=int, default=15)
+    parser.add_argument("--command-ttl", type=int, default=45)
+    parser.add_argument("--min-soc", type=float, default=12.0)
+    parser.add_argument("--reserve-interval", type=float, default=60.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -237,6 +249,7 @@ def run(args: argparse.Namespace) -> int:
     client = MarstekClient(args.device_id, args.port, args.state_file)
     failures = 0
     needs_probe = False
+    reserve_hold = False
 
     try:
         marstek_ip = client.ensure_ip()
@@ -272,21 +285,59 @@ def run(args: argparse.Namespace) -> int:
                         mode_status.get("ongrid_power"),
                         mode_status.get("bat_soc"),
                     )
-                    try:
-                        accepted = client.set_passive(target, args.command_ttl)
-                    except (OSError, ValueError, json.JSONDecodeError) as exc:
-                        raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
-                    if not accepted:
-                        raise RuntimeError("Marstek rejected ES.SetMode")
-                    LOGGER.info(
-                        "cycle ok P_Grid=%.0fW mode=%s previous_output=%sW "
-                        "target=%dW soc=%s%%",
-                        p_grid,
-                        mode_status["mode"],
-                        mode_status.get("ongrid_power"),
-                        target,
-                        mode_status.get("bat_soc"),
-                    )
+                    soc = float(mode_status["bat_soc"])
+                    guarded_target = apply_min_soc_guard(target, soc, args.min_soc)
+                    if guarded_target == 0 and target > 0:
+                        if not reserve_hold:
+                            try:
+                                accepted = client.set_passive(0, 10)
+                            except (
+                                OSError,
+                                ValueError,
+                                json.JSONDecodeError,
+                            ) as exc:
+                                raise RuntimeError(
+                                    f"ES.SetMode reserve stop failed: {exc}"
+                                ) from exc
+                            if not accepted:
+                                raise RuntimeError(
+                                    "Marstek rejected reserve 0W ES.SetMode"
+                                )
+                            LOGGER.info(
+                                "reserve hold entered P_Grid=%.0fW previous_output=%sW "
+                                "soc=%s%% min_soc=%s%%",
+                                p_grid,
+                                mode_status.get("ongrid_power"),
+                                mode_status.get("bat_soc"),
+                                args.min_soc,
+                            )
+                        else:
+                            LOGGER.info(
+                                "reserve hold active P_Grid=%.0fW output=%sW soc=%s%%",
+                                p_grid,
+                                mode_status.get("ongrid_power"),
+                                mode_status.get("bat_soc"),
+                            )
+                        reserve_hold = True
+                    else:
+                        reserve_hold = False
+                        try:
+                            accepted = client.set_passive(
+                                guarded_target, args.command_ttl
+                            )
+                        except (OSError, ValueError, json.JSONDecodeError) as exc:
+                            raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
+                        if not accepted:
+                            raise RuntimeError("Marstek rejected ES.SetMode")
+                        LOGGER.info(
+                            "cycle ok P_Grid=%.0fW mode=%s previous_output=%sW "
+                            "target=%dW soc=%s%%",
+                            p_grid,
+                            mode_status["mode"],
+                            mode_status.get("ongrid_power"),
+                            guarded_target,
+                            mode_status.get("bat_soc"),
+                        )
                 failures = 0
         except (
             OSError,
@@ -300,7 +351,8 @@ def run(args: argparse.Namespace) -> int:
             LOGGER.warning("Control cycle failed (%d): %s", failures, exc)
         if args.once:
             break
-        stop_event.wait(max(0.2, args.interval - (time.monotonic() - started)))
+        cycle_interval = args.reserve_interval if reserve_hold else args.interval
+        stop_event.wait(max(0.2, cycle_interval - (time.monotonic() - started)))
 
     if not args.dry_run and client.ip:
         try:
