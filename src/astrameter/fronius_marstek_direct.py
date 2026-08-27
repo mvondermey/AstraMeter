@@ -27,7 +27,7 @@ SET_MODE_METHOD = "ES.SetMode"
 GET_MODE_METHOD = "ES.GetMode"
 VALID_MODES = {"auto", "ai", "manual", "passive", "ups"}
 MIN_REQUEST_GAP = 10.0
-REQUEST_ATTEMPTS = 2
+REQUEST_ATTEMPTS = 3
 
 
 def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
