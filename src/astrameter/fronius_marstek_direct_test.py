@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from . import fronius_marstek_direct as direct
 from .fronius_marstek_direct import (
     MarstekClient,
     calculate_target,
@@ -85,6 +86,46 @@ def test_get_mode_rejects_invalid_mode(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="invalid mode"):
         client.get_mode()
+
+
+def test_request_retries_one_timeout(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    client = MarstekClient(
+        "5037cd7f1d02",
+        30000,
+        state_file,
+        minimum_request_gap=0,
+        request_attempts=2,
+    )
+    sockets = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.number = len(sockets) + 1
+            sockets.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendto(self, message, destination):
+            pass
+
+        def recvfrom(self, size):
+            if self.number == 1:
+                raise TimeoutError
+            return b'{"id":2,"result":{"id":0}}', ("192.168.1.95", 30000)
+
+    monkeypatch.setattr(direct.socket, "socket", lambda *args: FakeSocket())
+
+    assert client.request("Wifi.GetStatus", {"id": 0})["id"] == 2
+    assert len(sockets) == 2
 
 
 def test_extract_p_grid() -> None:

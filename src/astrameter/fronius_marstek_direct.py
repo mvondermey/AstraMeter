@@ -26,7 +26,8 @@ LOGGER = logging.getLogger("astrameter.direct")
 SET_MODE_METHOD = "ES.SetMode"
 GET_MODE_METHOD = "ES.GetMode"
 VALID_MODES = {"auto", "ai", "manual", "passive", "ups"}
-MIN_REQUEST_GAP = 5.0
+MIN_REQUEST_GAP = 10.0
+REQUEST_ATTEMPTS = 2
 
 
 def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
@@ -83,12 +84,14 @@ class MarstekClient:
         state_file: Path,
         timeout: float = 1.5,
         minimum_request_gap: float = MIN_REQUEST_GAP,
+        request_attempts: int = REQUEST_ATTEMPTS,
     ) -> None:
         self.device_id = device_id
         self.port = port
         self.state_file = state_file
         self.timeout = timeout
         self.minimum_request_gap = minimum_request_gap
+        self.request_attempts = request_attempts
         self.ip: str | None = self._load_last_ip()
         self._request_id = 0
         self._last_request_finished = 0.0
@@ -113,29 +116,42 @@ class MarstekClient:
         destination = target or self.ip
         if not destination:
             raise ConnectionError("Marstek IP is not known")
-        delay = required_request_delay(
-            self._last_request_finished,
-            time.monotonic(),
-            self.minimum_request_gap,
-        )
-        if delay:
-            time.sleep(delay)
-        request_id = self._next_id()
-        message = json.dumps(
-            {"id": request_id, "method": method, "params": params},
-            separators=(",", ":"),
-        ).encode()
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(self.timeout)
-                sock.sendto(message, (destination, self.port))
-                while True:
-                    data, _address = sock.recvfrom(65535)
-                    payload = json.loads(data.decode("utf-8"))
-                    if payload.get("id") == request_id:
-                        return payload
-        finally:
-            self._last_request_finished = time.monotonic()
+        if self.request_attempts < 1:
+            raise ValueError("request_attempts must be at least 1")
+        for attempt in range(1, self.request_attempts + 1):
+            delay = required_request_delay(
+                self._last_request_finished,
+                time.monotonic(),
+                self.minimum_request_gap,
+            )
+            if delay:
+                time.sleep(delay)
+            request_id = self._next_id()
+            message = json.dumps(
+                {"id": request_id, "method": method, "params": params},
+                separators=(",", ":"),
+            ).encode()
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(self.timeout)
+                    sock.sendto(message, (destination, self.port))
+                    while True:
+                        data, _address = sock.recvfrom(65535)
+                        payload = json.loads(data.decode("utf-8"))
+                        if payload.get("id") == request_id:
+                            return payload
+            except TimeoutError:
+                if attempt >= self.request_attempts:
+                    raise
+                LOGGER.warning(
+                    "%s timed out (attempt %d/%d); retrying after API gap",
+                    method,
+                    attempt,
+                    self.request_attempts,
+                )
+            finally:
+                self._last_request_finished = time.monotonic()
+        raise RuntimeError("unreachable request retry state")
 
     def ensure_ip(self) -> str:
         """Validate the cached address without broadcasting on the LAN."""
