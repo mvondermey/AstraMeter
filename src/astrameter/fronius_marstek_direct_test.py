@@ -7,7 +7,6 @@ import pytest
 from . import fronius_marstek_direct as direct
 from .fronius_marstek_direct import (
     MarstekClient,
-    apply_min_soc_guard,
     calculate_target,
     device_matches,
     extract_p_grid,
@@ -28,18 +27,10 @@ def test_calculate_target_rejects_non_finite() -> None:
         calculate_target(float("nan"), 50, 2500)
 
 
-def test_apply_min_soc_guard_only_blocks_discharge() -> None:
-    assert apply_min_soc_guard(600, 12, 12) == 0
-    assert apply_min_soc_guard(600, 11, 12) == 0
-    assert apply_min_soc_guard(600, 13, 12) == 600
-    assert apply_min_soc_guard(-600, 12, 12) == -600
-    assert apply_min_soc_guard(0, 12, 12) == 0
-
-
-def test_run_min_soc_guard_allows_subsequent_charge(
+def test_run_applies_grid_target_independently_of_reported_soc(
     tmp_path, monkeypatch
 ) -> None:
-    """A low SOC blocks discharge, but must never block subsequent charging."""
+    """Battery firmware, not the controller, enforces the configured SOC limit."""
     set_calls: list[tuple[int, int]] = []
     grid_values: Iterator[int] = iter((600, -400))
 
@@ -92,7 +83,7 @@ def test_run_min_soc_guard_allows_subsequent_charge(
     monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
 
     assert direct.run(args) == 0
-    assert set_calls == [(0, 45), (-400, 45), (0, 10)]
+    assert set_calls == [(600, 45), (-400, 45), (0, 10)]
 
 
 def test_fronius_failure_does_not_trigger_marstek_probe(tmp_path, monkeypatch) -> None:

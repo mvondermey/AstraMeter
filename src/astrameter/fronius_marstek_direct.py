@@ -43,13 +43,6 @@ def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
     return max(-max_power, min(max_power, round(p_grid)))
 
 
-def apply_min_soc_guard(target: int, soc: float, minimum_soc: float) -> int:
-    """Prevent discharge requests at or below the configured reserve SOC."""
-    if target > 0 and soc <= minimum_soc:
-        return 0
-    return target
-
-
 def required_request_delay(
     last_finished: float, now: float, minimum_gap: float
 ) -> float:
@@ -229,7 +222,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deadband", type=int, default=50)
     parser.add_argument("--max-power", type=int, default=2500)
     parser.add_argument("--command-ttl", type=int, default=45)
-    parser.add_argument("--min-soc", type=float, default=12.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -295,10 +287,8 @@ def run(args: argparse.Namespace) -> int:
                         mode_status.get("ongrid_power"),
                         mode_status.get("bat_soc"),
                     )
-                    soc = float(mode_status["bat_soc"])
-                    guarded_target = apply_min_soc_guard(target, soc, args.min_soc)
                     try:
-                        accepted = client.set_passive(guarded_target, args.command_ttl)
+                        accepted = client.set_passive(target, args.command_ttl)
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
                         raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
                     if not accepted:
@@ -309,7 +299,7 @@ def run(args: argparse.Namespace) -> int:
                         p_grid,
                         mode_status["mode"],
                         mode_status.get("ongrid_power"),
-                        guarded_target,
+                        target,
                         mode_status.get("bat_soc"),
                     )
                 failures = 0
