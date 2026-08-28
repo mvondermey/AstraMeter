@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
 from . import fronius_marstek_direct as direct
@@ -32,6 +34,65 @@ def test_apply_min_soc_guard_only_blocks_discharge() -> None:
     assert apply_min_soc_guard(600, 13, 12) == 600
     assert apply_min_soc_guard(-600, 12, 12) == -600
     assert apply_min_soc_guard(0, 12, 12) == 0
+
+
+def test_run_leaves_reserve_hold_to_charge_on_solar_surplus(
+    tmp_path, monkeypatch
+) -> None:
+    """A low SOC blocks discharge, but must never block subsequent charging."""
+    set_calls: list[tuple[int, int]] = []
+    grid_values: Iterator[int] = iter((600, -400))
+
+    class FakeStopEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def is_set(self) -> bool:
+            return self.waits >= 2
+
+        def set(self) -> None:
+            self.waits = 2
+
+        def wait(self, _timeout: float) -> None:
+            self.waits += 1
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def ensure_ip(self) -> str:
+            return self.ip
+
+        def get_mode(self) -> dict[str, object]:
+            return {
+                "id": 0,
+                "mode": "Passive",
+                "ongrid_power": 0,
+                "bat_soc": 11,
+            }
+
+        def set_passive(self, power: int, duration: int) -> bool:
+            set_calls.append((power, duration))
+            return True
+
+    args = direct.build_parser().parse_args(
+        [
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", lambda _host: next(grid_values))
+    monkeypatch.setattr(direct.threading, "Event", FakeStopEvent)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert set_calls == [(0, 10), (-400, 45), (0, 10)]
 
 
 def test_required_request_delay() -> None:
