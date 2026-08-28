@@ -50,11 +50,6 @@ def apply_min_soc_guard(target: int, soc: float, minimum_soc: float) -> int:
     return target
 
 
-def should_hold_reserve(target: int, soc: float, minimum_soc: float) -> bool:
-    """Keep reserve hold for import and deadband, but release it for charging."""
-    return target >= 0 and soc <= minimum_soc
-
-
 def required_request_delay(
     last_finished: float, now: float, minimum_gap: float
 ) -> float:
@@ -235,7 +230,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-power", type=int, default=2500)
     parser.add_argument("--command-ttl", type=int, default=45)
     parser.add_argument("--min-soc", type=float, default=12.0)
-    parser.add_argument("--reserve-interval", type=float, default=20.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -258,7 +252,6 @@ def run(args: argparse.Namespace) -> int:
     client = MarstekClient(args.device_id, args.port, args.state_file)
     failures = 0
     needs_probe = False
-    reserve_hold = False
 
     try:
         marstek_ip = client.ensure_ip()
@@ -304,57 +297,21 @@ def run(args: argparse.Namespace) -> int:
                     )
                     soc = float(mode_status["bat_soc"])
                     guarded_target = apply_min_soc_guard(target, soc, args.min_soc)
-                    if should_hold_reserve(target, soc, args.min_soc):
-                        if not reserve_hold:
-                            try:
-                                accepted = client.set_passive(0, 10)
-                            except (
-                                OSError,
-                                ValueError,
-                                json.JSONDecodeError,
-                            ) as exc:
-                                raise RuntimeError(
-                                    f"ES.SetMode reserve stop failed: {exc}"
-                                ) from exc
-                            if not accepted:
-                                raise RuntimeError(
-                                    "Marstek rejected reserve 0W ES.SetMode"
-                                )
-                            LOGGER.info(
-                                "reserve hold entered P_Grid=%.0fW previous_output=%sW "
-                                "soc=%s%% min_soc=%s%%",
-                                p_grid,
-                                mode_status.get("ongrid_power"),
-                                mode_status.get("bat_soc"),
-                                args.min_soc,
-                            )
-                        else:
-                            LOGGER.info(
-                                "reserve hold active P_Grid=%.0fW output=%sW soc=%s%%",
-                                p_grid,
-                                mode_status.get("ongrid_power"),
-                                mode_status.get("bat_soc"),
-                            )
-                        reserve_hold = True
-                    else:
-                        reserve_hold = False
-                        try:
-                            accepted = client.set_passive(
-                                guarded_target, args.command_ttl
-                            )
-                        except (OSError, ValueError, json.JSONDecodeError) as exc:
-                            raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
-                        if not accepted:
-                            raise RuntimeError("Marstek rejected ES.SetMode")
-                        LOGGER.info(
-                            "cycle ok P_Grid=%.0fW mode=%s previous_output=%sW "
-                            "target=%dW soc=%s%%",
-                            p_grid,
-                            mode_status["mode"],
-                            mode_status.get("ongrid_power"),
-                            guarded_target,
-                            mode_status.get("bat_soc"),
-                        )
+                    try:
+                        accepted = client.set_passive(guarded_target, args.command_ttl)
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
+                    if not accepted:
+                        raise RuntimeError("Marstek rejected ES.SetMode")
+                    LOGGER.info(
+                        "cycle ok P_Grid=%.0fW mode=%s previous_output=%sW "
+                        "target=%dW soc=%s%%",
+                        p_grid,
+                        mode_status["mode"],
+                        mode_status.get("ongrid_power"),
+                        guarded_target,
+                        mode_status.get("bat_soc"),
+                    )
                 failures = 0
         except FroniusReadError as exc:
             failures += 1
@@ -371,8 +328,7 @@ def run(args: argparse.Namespace) -> int:
             LOGGER.warning("Control cycle failed (%d): %s", failures, exc)
         if args.once:
             break
-        cycle_interval = args.reserve_interval if reserve_hold else args.interval
-        stop_event.wait(max(0.2, cycle_interval - (time.monotonic() - started)))
+        stop_event.wait(max(0.2, args.interval - (time.monotonic() - started)))
 
     if not args.dry_run and client.ip:
         try:
