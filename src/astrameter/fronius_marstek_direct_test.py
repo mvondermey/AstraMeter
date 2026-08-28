@@ -148,6 +148,82 @@ def test_fronius_failure_does_not_trigger_marstek_probe(tmp_path, monkeypatch) -
     assert ensure_calls == 1
 
 
+def test_marstek_failure_probes_before_resuming_writes(tmp_path, monkeypatch) -> None:
+    """After an API failure, one read-only probe cycle must precede new writes."""
+    ensure_calls = 0
+    grid_reads = 0
+    get_mode_calls = 0
+    set_calls: list[tuple[int, int]] = []
+
+    class FakeStopEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def is_set(self) -> bool:
+            return self.waits >= 3
+
+        def set(self) -> None:
+            self.waits = 3
+
+        def wait(self, _timeout: float) -> None:
+            self.waits += 1
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def ensure_ip(self) -> str:
+            nonlocal ensure_calls
+            ensure_calls += 1
+            return self.ip
+
+        def get_mode(self) -> dict[str, object]:
+            nonlocal get_mode_calls
+            get_mode_calls += 1
+            return {
+                "id": 0,
+                "mode": "Passive",
+                "ongrid_power": 0,
+                "bat_soc": 50,
+            }
+
+        def set_passive(self, power: int, duration: int) -> bool:
+            set_calls.append((power, duration))
+            if len(set_calls) == 1:
+                raise OSError("temporary UDP timeout")
+            return True
+
+        def close(self) -> None:
+            pass
+
+    def fake_read_fronius(_host: str) -> float:
+        nonlocal grid_reads
+        grid_reads += 1
+        return 500.0
+
+    args = direct.build_parser().parse_args(
+        [
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", fake_read_fronius)
+    monkeypatch.setattr(direct.threading, "Event", FakeStopEvent)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert ensure_calls == 2
+    assert grid_reads == 2
+    assert get_mode_calls == 2
+    assert set_calls == [(500, 45), (500, 45), (0, 10)]
+
+
 def test_required_request_delay() -> None:
     assert required_request_delay(0, 10, 5) == 0
     assert required_request_delay(10, 12, 5) == 3
