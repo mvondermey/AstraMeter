@@ -95,6 +95,62 @@ def test_run_leaves_reserve_hold_to_charge_on_solar_surplus(
     assert set_calls == [(0, 10), (-400, 45), (0, 10)]
 
 
+def test_fronius_failure_does_not_trigger_marstek_probe(tmp_path, monkeypatch) -> None:
+    """A Fronius/DNS outage must not invalidate a reachable Marstek address."""
+    ensure_calls = 0
+    grid_reads = 0
+
+    class FakeStopEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def is_set(self) -> bool:
+            return self.waits >= 2
+
+        def set(self) -> None:
+            self.waits = 2
+
+        def wait(self, _timeout: float) -> None:
+            self.waits += 1
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def ensure_ip(self) -> str:
+            nonlocal ensure_calls
+            ensure_calls += 1
+            return self.ip
+
+    def fake_read_fronius(_host: str) -> float:
+        nonlocal grid_reads
+        grid_reads += 1
+        if grid_reads == 1:
+            raise OSError("temporary DNS failure")
+        return 123.0
+
+    args = direct.build_parser().parse_args(
+        [
+            "--dry-run",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", fake_read_fronius)
+    monkeypatch.setattr(direct.threading, "Event", FakeStopEvent)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert grid_reads == 2
+    assert ensure_calls == 1
+
+
 def test_required_request_delay() -> None:
     assert required_request_delay(0, 10, 5) == 0
     assert required_request_delay(10, 12, 5) == 3

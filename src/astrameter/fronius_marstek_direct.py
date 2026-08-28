@@ -30,6 +30,10 @@ MIN_REQUEST_GAP = 10.0
 REQUEST_ATTEMPTS = 3
 
 
+class FroniusReadError(RuntimeError):
+    """A Fronius read failed without implying a Marstek connectivity problem."""
+
+
 def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
     """Convert Fronius grid exchange into a bounded Marstek setpoint."""
     if not math.isfinite(p_grid):
@@ -270,8 +274,16 @@ def run(args: argparse.Namespace) -> int:
                 needs_probe = False
                 failures = 0
             else:
-                p_grid = read_fronius(args.fronius_host)
-                target = calculate_target(p_grid, args.deadband, args.max_power)
+                try:
+                    p_grid = read_fronius(args.fronius_host)
+                    target = calculate_target(p_grid, args.deadband, args.max_power)
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    raise FroniusReadError(str(exc)) from exc
                 if args.dry_run:
                     LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
                 else:
@@ -339,6 +351,9 @@ def run(args: argparse.Namespace) -> int:
                             mode_status.get("bat_soc"),
                         )
                 failures = 0
+        except FroniusReadError as exc:
+            failures += 1
+            LOGGER.warning("Fronius read failed (%d): %s", failures, exc)
         except (
             OSError,
             ValueError,
