@@ -47,6 +47,21 @@ Run continuously:
 .venv\Scripts\python.exe -m astrameter.fronius_marstek_direct
 ```
 
+On Windows systems with Smart App Control or WDAC enabled, use an officially
+signed Python installation for unattended tasks. Some standalone `uv` Python
+runtimes may be rejected with Code Integrity events 3033/3077 even though an
+already-running process continues to work. Do not disable the security policy;
+install the signed python.org build and point Task Scheduler at it instead:
+
+```powershell
+winget install --id Python.Python.3.14 --exact --scope user
+& "$env:LOCALAPPDATA\Programs\Python\Python314\python.exe" `
+  src\astrameter\fronius_marstek_direct.py
+```
+
+Using the script path directly avoids needing another virtual environment; the
+direct controller and opportunity report use only the Python standard library.
+
 The battery is identified by its stable BLE MAC/device suffix. Its last known
 address is read from `.marstek-direct-ip`; reserve that address for the battery
 in the router so DHCP does not change it.
