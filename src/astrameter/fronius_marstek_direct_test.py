@@ -155,6 +155,22 @@ def test_required_request_delay() -> None:
     assert required_request_delay(10, 20, 5) == 0
 
 
+def test_run_rejects_nonpositive_api_request_gap(tmp_path) -> None:
+    args = direct.build_parser().parse_args(
+        [
+            "--api-request-gap",
+            "0",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="greater than zero"):
+        direct.run(args)
+
+
 def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:
     state_file = tmp_path / "ip"
     state_file.write_text("192.168.1.95", encoding="utf-8")

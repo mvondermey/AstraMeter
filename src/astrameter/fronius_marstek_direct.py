@@ -240,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device-id", default="5037cd7f1d02")
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--interval", type=float, default=5.0)
+    parser.add_argument("--api-request-gap", type=float, default=MIN_REQUEST_GAP)
     parser.add_argument("--deadband", type=int, default=50)
     parser.add_argument("--max-power", type=int, default=2500)
     parser.add_argument("--command-ttl", type=int, default=45)
@@ -262,7 +263,14 @@ def run(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
-    client = MarstekClient(args.device_id, args.port, args.state_file)
+    if args.api_request_gap <= 0:
+        raise ValueError("--api-request-gap must be greater than zero")
+    client = MarstekClient(
+        args.device_id,
+        args.port,
+        args.state_file,
+        minimum_request_gap=args.api_request_gap,
+    )
     failures = 0
     needs_probe = False
 

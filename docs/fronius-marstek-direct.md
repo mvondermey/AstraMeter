@@ -25,6 +25,11 @@ than Wi-Fi. After changing interfaces, use a one-time documented
 device identity with a read call before resuming control. Runtime recovery
 continues to avoid broadcast discovery.
 
+`--api-request-gap` can override the conservative 10-second default after a
+stable wired-Ethernet path has been verified. Because each control cycle sends
+one `ES.GetMode` followed by one `ES.SetMode`, a 2.5-second request gap produces
+an approximately 5-second setpoint refresh. Keep the default on Wi-Fi.
+
 The controller does not impose its own SOC, depth-of-discharge, backup, grid,
 or protection limits. Those remain under the Marstek battery firmware and app
 configuration. Reported SOC is validated and logged, but never changes the
