@@ -12,6 +12,7 @@ from .fronius_marstek_direct import (
     device_matches,
     extract_p_grid,
     required_request_delay,
+    should_hold_reserve,
 )
 
 
@@ -34,6 +35,13 @@ def test_apply_min_soc_guard_only_blocks_discharge() -> None:
     assert apply_min_soc_guard(600, 13, 12) == 600
     assert apply_min_soc_guard(-600, 12, 12) == -600
     assert apply_min_soc_guard(0, 12, 12) == 0
+
+
+def test_reserve_hold_includes_deadband_but_releases_for_charging() -> None:
+    assert should_hold_reserve(600, 12, 12)
+    assert should_hold_reserve(0, 11, 12)
+    assert not should_hold_reserve(-1, 11, 12)
+    assert not should_hold_reserve(0, 13, 12)
 
 
 def test_run_leaves_reserve_hold_to_charge_on_solar_surplus(
@@ -93,6 +101,63 @@ def test_run_leaves_reserve_hold_to_charge_on_solar_surplus(
 
     assert direct.run(args) == 0
     assert set_calls == [(0, 10), (-400, 45), (0, 10)]
+
+
+def test_run_keeps_reserve_hold_across_deadband(tmp_path, monkeypatch) -> None:
+    """Deadband at reserve SOC must not cause repeated 0 W writes."""
+    set_calls: list[tuple[int, int]] = []
+    grid_values: Iterator[int] = iter((600, 0, 200))
+
+    class FakeStopEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def is_set(self) -> bool:
+            return self.waits >= 3
+
+        def set(self) -> None:
+            self.waits = 3
+
+        def wait(self, _timeout: float) -> None:
+            self.waits += 1
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def ensure_ip(self) -> str:
+            return self.ip
+
+        def get_mode(self) -> dict[str, object]:
+            return {
+                "id": 0,
+                "mode": "Passive",
+                "ongrid_power": 0,
+                "bat_soc": 11,
+            }
+
+        def set_passive(self, power: int, duration: int) -> bool:
+            set_calls.append((power, duration))
+            return True
+
+    args = direct.build_parser().parse_args(
+        [
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", lambda _host: next(grid_values))
+    monkeypatch.setattr(direct.threading, "Event", FakeStopEvent)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert set_calls == [(0, 10), (0, 10)]
 
 
 def test_fronius_failure_does_not_trigger_marstek_probe(tmp_path, monkeypatch) -> None:

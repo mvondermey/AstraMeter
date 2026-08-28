@@ -50,6 +50,11 @@ def apply_min_soc_guard(target: int, soc: float, minimum_soc: float) -> int:
     return target
 
 
+def should_hold_reserve(target: int, soc: float, minimum_soc: float) -> bool:
+    """Keep reserve hold for import and deadband, but release it for charging."""
+    return target >= 0 and soc <= minimum_soc
+
+
 def required_request_delay(
     last_finished: float, now: float, minimum_gap: float
 ) -> float:
@@ -299,7 +304,7 @@ def run(args: argparse.Namespace) -> int:
                     )
                     soc = float(mode_status["bat_soc"])
                     guarded_target = apply_min_soc_guard(target, soc, args.min_soc)
-                    if guarded_target == 0 and target > 0:
+                    if should_hold_reserve(target, soc, args.min_soc):
                         if not reserve_hold:
                             try:
                                 accepted = client.set_passive(0, 10)
