@@ -235,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-power", type=int, default=2500)
     parser.add_argument("--command-ttl", type=int, default=45)
     parser.add_argument("--min-soc", type=float, default=12.0)
-    parser.add_argument("--reserve-interval", type=float, default=60.0)
+    parser.add_argument("--reserve-interval", type=float, default=20.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")

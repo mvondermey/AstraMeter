@@ -44,6 +44,10 @@ def test_reserve_hold_includes_deadband_but_releases_for_charging() -> None:
     assert not should_hold_reserve(0, 13, 12)
 
 
+def test_default_reserve_poll_interval_is_twenty_seconds() -> None:
+    assert direct.build_parser().parse_args([]).reserve_interval == 20.0
+
+
 def test_run_leaves_reserve_hold_to_charge_on_solar_surplus(
     tmp_path, monkeypatch
 ) -> None:

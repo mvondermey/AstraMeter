@@ -15,9 +15,10 @@ API requests, validates `ES.GetMode` before every `ES.SetMode`, and makes up to
 three attempts. It does not use UDP broadcast discovery during recovery.
 
 At or below the configured minimum SOC (12% by default), positive discharge
-requests are held at 0 W and checked once per minute. Negative charging
-requests remain allowed. Use `--min-soc` and `--reserve-interval` to match a
-different reserve configuration.
+requests and deadband readings remain in a write-free 0 W hold. Fronius and
+Marstek state are checked every 20 seconds so new solar surplus is detected
+promptly, while negative charging requests remain allowed. Use `--min-soc` and
+`--reserve-interval` to match a different reserve configuration.
 
 Run once without controlling the battery:
 
