@@ -68,6 +68,9 @@ def test_run_applies_grid_target_independently_of_reported_soc(
             set_calls.append((power, duration))
             return True
 
+        def close(self) -> None:
+            pass
+
     args = direct.build_parser().parse_args(
         [
             "--state-file",
@@ -114,6 +117,9 @@ def test_fronius_failure_does_not_trigger_marstek_probe(tmp_path, monkeypatch) -
             nonlocal ensure_calls
             ensure_calls += 1
             return self.ip
+
+        def close(self) -> None:
+            pass
 
     def fake_read_fronius(_host: str) -> float:
         nonlocal grid_reads
@@ -219,14 +225,13 @@ def test_request_retries_one_timeout(tmp_path, monkeypatch) -> None:
 
     class FakeSocket:
         def __init__(self):
-            self.number = len(sockets) + 1
+            self.receive_calls = 0
+            self.bound_to = None
+            self.closed = False
             sockets.append(self)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
+        def bind(self, address):
+            self.bound_to = address
 
         def settimeout(self, timeout):
             pass
@@ -235,14 +240,22 @@ def test_request_retries_one_timeout(tmp_path, monkeypatch) -> None:
             pass
 
         def recvfrom(self, size):
-            if self.number == 1:
+            self.receive_calls += 1
+            if self.receive_calls == 1:
                 raise TimeoutError
             return b'{"id":2,"result":{"id":0}}', ("192.168.1.95", 30000)
+
+        def close(self):
+            self.closed = True
 
     monkeypatch.setattr(direct.socket, "socket", lambda *args: FakeSocket())
 
     assert client.request("Wifi.GetStatus", {"id": 0})["id"] == 2
-    assert len(sockets) == 2
+    assert len(sockets) == 1
+    assert sockets[0].bound_to == ("0.0.0.0", 30000)
+
+    client.close()
+    assert sockets[0].closed is True
 
 
 def test_extract_p_grid() -> None:

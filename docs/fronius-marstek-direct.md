@@ -13,6 +13,15 @@ The Venus E 3.0 local UDP service occasionally drops responses even when Wi-Fi
 remains reachable. The controller therefore keeps at least 10 seconds between
 API requests, validates `ES.GetMode` before every `ES.SetMode`, and makes up to
 three attempts. It does not use UDP broadcast discovery during recovery.
+It keeps one serialized UDP socket bound to the configured OpenAPI port (both
+local source and device destination port, normally `30000`) for the lifetime of
+the controller. This matches the Venus E protocol's reply path and avoids the
+ephemeral source ports used by an unbound UDP socket.
+
+The same UDP OpenAPI is documented for a Venus connected through Wi-Fi or its
+wired Ethernet port. A network-interface change can temporarily interrupt the
+device service; validate the device identity with a read call before resuming
+control.
 
 The controller does not impose its own SOC, depth-of-discharge, backup, grid,
 or protection limits. Those remain under the Marstek battery firmware and app

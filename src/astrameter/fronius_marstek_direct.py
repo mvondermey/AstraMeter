@@ -99,6 +99,28 @@ class MarstekClient:
         self.ip: str | None = self._load_last_ip()
         self._request_id = 0
         self._last_request_finished = 0.0
+        self._socket: socket.socket | None = None
+
+    def _get_socket(self) -> socket.socket:
+        """Return the single source-port-pinned socket used by this client."""
+        if self._socket is None:
+            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # Venus E replies reliably only when the client listens on the
+                # configured OpenAPI port as well as sending to that port.
+                udp_socket.bind(("0.0.0.0", self.port))
+                udp_socket.settimeout(self.timeout)
+            except BaseException:
+                udp_socket.close()
+                raise
+            self._socket = udp_socket
+        return self._socket
+
+    def close(self) -> None:
+        """Release the local OpenAPI UDP port."""
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
 
     def _load_last_ip(self) -> str | None:
         try:
@@ -136,14 +158,13 @@ class MarstekClient:
                 separators=(",", ":"),
             ).encode()
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.settimeout(self.timeout)
-                    sock.sendto(message, (destination, self.port))
-                    while True:
-                        data, _address = sock.recvfrom(65535)
-                        payload = json.loads(data.decode("utf-8"))
-                        if payload.get("id") == request_id:
-                            return payload
+                sock = self._get_socket()
+                sock.sendto(message, (destination, self.port))
+                while True:
+                    data, _address = sock.recvfrom(65535)
+                    payload = json.loads(data.decode("utf-8"))
+                    if payload.get("id") == request_id:
+                        return payload
             except TimeoutError:
                 if attempt >= self.request_attempts:
                     raise
@@ -320,15 +341,18 @@ def run(args: argparse.Namespace) -> int:
             break
         stop_event.wait(max(0.2, args.interval - (time.monotonic() - started)))
 
-    if not args.dry_run and client.ip:
-        try:
-            time.sleep(5.0)
-            client.set_passive(0, 10)
-            LOGGER.info("Controller stopped; Marstek setpoint reset to 0W")
-        except (OSError, ValueError, json.JSONDecodeError):
-            LOGGER.warning(
-                "Could not send final 0W setpoint; previous command will expire"
-            )
+    try:
+        if not args.dry_run and client.ip:
+            try:
+                time.sleep(5.0)
+                client.set_passive(0, 10)
+                LOGGER.info("Controller stopped; Marstek setpoint reset to 0W")
+            except (OSError, ValueError, json.JSONDecodeError):
+                LOGGER.warning(
+                    "Could not send final 0W setpoint; previous command will expire"
+                )
+    finally:
+        client.close()
     return 0
 
 
