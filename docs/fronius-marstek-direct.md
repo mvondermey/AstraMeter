@@ -19,9 +19,11 @@ the controller. This matches the Venus E protocol's reply path and avoids the
 ephemeral source ports used by an unbound UDP socket.
 
 The same UDP OpenAPI is documented for a Venus connected through Wi-Fi or its
-wired Ethernet port. A network-interface change can temporarily interrupt the
-device service; validate the device identity with a read call before resuming
-control.
+wired Ethernet port. Ethernet may receive a different MAC address and DHCP IP
+than Wi-Fi. After changing interfaces, use a one-time documented
+`Marstek.GetDevice` discovery, update the cached address, and validate the
+device identity with a read call before resuming control. Runtime recovery
+continues to avoid broadcast discovery.
 
 The controller does not impose its own SOC, depth-of-discharge, backup, grid,
 or protection limits. Those remain under the Marstek battery firmware and app
