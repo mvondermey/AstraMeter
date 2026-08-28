@@ -50,3 +50,26 @@ Run continuously:
 The battery is identified by its stable BLE MAC/device suffix. Its last known
 address is read from `.marstek-direct-ip`; reserve that address for the battery
 in the router so DHCP does not change it.
+
+## Second-battery opportunity report
+
+The controller log retains the raw, unclamped `P_Grid` value as well as the
+bounded battery target. A separate read-only report can therefore estimate how
+long available PV surplus exceeded one battery's power limit and how much
+additional energy another battery could theoretically have accepted:
+
+```powershell
+.venv\Scripts\python.exe -m astrameter.fronius_marstek_opportunity `
+  --log-file fronius-marstek-direct.log `
+  --output second-battery-opportunity.csv `
+  --date yesterday `
+  --power-limit 2500
+```
+
+The report reads the active log plus numeric rotated backups and atomically
+upserts one CSV row per day. Gaps longer than 10 seconds are capped rather than
+being counted as measured time. In addition to surplus above the power limit,
+the report separately estimates surplus observed at 99% or higher SOC. These
+figures are theoretical opportunities, not guaranteed usable battery energy;
+conversion losses, battery limits, load changes, and the meter topology still
+apply. Use multiple representative days before making a capacity decision.
