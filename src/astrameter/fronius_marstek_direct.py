@@ -1,9 +1,11 @@
-"""Direct Fronius-to-Marstek controller for a load-position Fronius meter.
+"""Direct Fronius-to-Marstek controller.
 
 The Fronius ``P_Grid`` value is used as the requested Marstek passive power:
 positive values discharge the battery, negative values charge it.  This is the
 correct relationship when the Fronius Smart Meter does not see the Marstek AC
-power, as is typical for a meter configured at the load position.
+power, as is typical for a meter configured at the load position.  When the
+meter does see the battery, ``--meter-sees-battery`` enables closed-loop
+feedback based on the battery's reported output plus the remaining grid error.
 """
 
 from __future__ import annotations
@@ -41,6 +43,30 @@ def calculate_target(p_grid: float, deadband: int, max_power: int) -> int:
     if abs(p_grid) < deadband:
         return 0
     return max(-max_power, min(max_power, round(p_grid)))
+
+
+def calculate_feedback_target(
+    p_grid: float,
+    current_output: float,
+    deadband: int,
+    max_power: int,
+    gain: float = 1.0,
+) -> int:
+    """Correct the current battery output by the measured grid error.
+
+    Both values use the same sign convention: positive discharges and negative
+    charges.  Inside the grid deadband the existing output is held instead of
+    being reset to zero.
+    """
+    if not math.isfinite(p_grid):
+        raise ValueError("Fronius P_Grid is not finite")
+    if not math.isfinite(current_output):
+        raise ValueError("Marstek ongrid_power is not finite")
+    if not math.isfinite(gain) or not 0 < gain <= 1:
+        raise ValueError("feedback gain must be greater than zero and at most one")
+    correction = 0.0 if abs(p_grid) < deadband else p_grid
+    target = round(current_output + gain * correction)
+    return max(-max_power, min(max_power, target))
 
 
 def required_request_delay(
@@ -244,6 +270,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deadband", type=int, default=50)
     parser.add_argument("--max-power", type=int, default=2500)
     parser.add_argument("--command-ttl", type=int, default=45)
+    parser.add_argument(
+        "--meter-sees-battery",
+        action="store_true",
+        help="use battery output plus Fronius grid error as the next setpoint",
+    )
+    parser.add_argument(
+        "--feedback-gain",
+        type=float,
+        default=1.0,
+        help="fraction of each measured grid error applied in closed-loop mode",
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -265,6 +302,8 @@ def run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     if args.api_request_gap <= 0:
         raise ValueError("--api-request-gap must be greater than zero")
+    if not 0 < args.feedback_gain <= 1:
+        raise ValueError("--feedback-gain must be greater than zero and at most one")
     client = MarstekClient(
         args.device_id,
         args.port,
@@ -295,7 +334,6 @@ def run(args: argparse.Namespace) -> int:
             else:
                 try:
                     p_grid = read_fronius(args.fronius_host)
-                    target = calculate_target(p_grid, args.deadband, args.max_power)
                 except (
                     OSError,
                     ValueError,
@@ -304,6 +342,7 @@ def run(args: argparse.Namespace) -> int:
                 ) as exc:
                     raise FroniusReadError(str(exc)) from exc
                 if args.dry_run:
+                    target = calculate_target(p_grid, args.deadband, args.max_power)
                     LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
                 else:
                     try:
@@ -316,6 +355,19 @@ def run(args: argparse.Namespace) -> int:
                         mode_status.get("ongrid_power"),
                         mode_status.get("bat_soc"),
                     )
+                    if args.meter_sees_battery:
+                        current_output = float(mode_status.get("ongrid_power", 0))
+                        target = calculate_feedback_target(
+                            p_grid,
+                            current_output,
+                            args.deadband,
+                            args.max_power,
+                            args.feedback_gain,
+                        )
+                    else:
+                        target = calculate_target(
+                            p_grid, args.deadband, args.max_power
+                        )
                     try:
                         accepted = client.set_passive(target, args.command_ttl)
                     except (OSError, ValueError, json.JSONDecodeError) as exc:

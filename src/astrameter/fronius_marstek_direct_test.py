@@ -7,6 +7,7 @@ import pytest
 from . import fronius_marstek_direct as direct
 from .fronius_marstek_direct import (
     MarstekClient,
+    calculate_feedback_target,
     calculate_target,
     device_matches,
     extract_p_grid,
@@ -25,6 +26,94 @@ def test_calculate_target_sign_deadband_and_limit() -> None:
 def test_calculate_target_rejects_non_finite() -> None:
     with pytest.raises(ValueError):
         calculate_target(float("nan"), 50, 2500)
+
+
+def test_calculate_feedback_target_corrects_existing_output() -> None:
+    assert calculate_feedback_target(-238, -2490, 50, 2500) == -2500
+    assert calculate_feedback_target(500, -1000, 50, 2500) == -500
+    assert calculate_feedback_target(500, 1000, 50, 2500) == 1500
+
+
+def test_calculate_feedback_target_holds_output_inside_deadband() -> None:
+    assert calculate_feedback_target(-37, -224, 50, 2500) == -224
+
+
+def test_calculate_feedback_target_applies_gain() -> None:
+    assert calculate_feedback_target(-1000, -500, 50, 2500, 0.5) == -1000
+    assert calculate_feedback_target(600, -1000, 50, 2500, 0.5) == -700
+
+
+def test_calculate_feedback_target_rejects_non_finite_output() -> None:
+    with pytest.raises(ValueError, match="ongrid_power"):
+        calculate_feedback_target(100, float("nan"), 50, 2500)
+
+
+def test_calculate_feedback_target_rejects_invalid_gain() -> None:
+    with pytest.raises(ValueError, match="feedback gain"):
+        calculate_feedback_target(100, 0, 50, 2500, 0)
+
+
+def test_run_uses_closed_loop_feedback_when_meter_sees_battery(
+    tmp_path, monkeypatch
+) -> None:
+    set_calls: list[tuple[int, int]] = []
+    grid_values: Iterator[int] = iter((-238, 500))
+    output_values: Iterator[int] = iter((-2490, -1000))
+
+    class FakeStopEvent:
+        def __init__(self) -> None:
+            self.waits = 0
+
+        def is_set(self) -> bool:
+            return self.waits >= 2
+
+        def set(self) -> None:
+            self.waits = 2
+
+        def wait(self, _timeout: float) -> None:
+            self.waits += 1
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def ensure_ip(self) -> str:
+            return self.ip
+
+        def get_mode(self) -> dict[str, object]:
+            return {
+                "id": 0,
+                "mode": "Passive",
+                "ongrid_power": next(output_values),
+                "bat_soc": 50,
+            }
+
+        def set_passive(self, power: int, duration: int) -> bool:
+            set_calls.append((power, duration))
+            return True
+
+        def close(self) -> None:
+            pass
+
+    args = direct.build_parser().parse_args(
+        [
+            "--meter-sees-battery",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", lambda _host: next(grid_values))
+    monkeypatch.setattr(direct.threading, "Event", FakeStopEvent)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert set_calls == [(-2500, 45), (-500, 45), (0, 10)]
 
 
 def test_run_applies_grid_target_independently_of_reported_soc(
