@@ -2,7 +2,7 @@
 
 ## Next
 
-- **Fixed** direct Windows operation and Fronius load-position meter feedback by including the Marstek's locally reported AC power, allowing phase diagnosis to see the battery's test pulse.
+- **Fixed** direct Windows operation and Fronius load-position meter feedback by including the Marstek's locally reported AC power, allowing phase diagnosis to see the battery's test pulse, while documenting resilient Windows startup that survives power-source changes and restarts failures.
 
 ## 2.2.4
 

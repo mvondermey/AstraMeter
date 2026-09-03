@@ -62,6 +62,29 @@ winget install --id Python.Python.3.14 --exact --scope user
 Using the script path directly avoids needing another virtual environment; the
 direct controller and opportunity report use only the Python standard library.
 
+For an always-on Windows controller, make sure Task Scheduler does not stop the
+task when Windows reports a switch to battery power. This can also happen on a
+desktop connected to a UPS. Keep an unlimited execution time and enable restart
+on failure:
+
+```powershell
+$settings = New-ScheduledTaskSettingsSet `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries `
+  -StartWhenAvailable `
+  -RestartCount 10 `
+  -RestartInterval (New-TimeSpan -Minutes 1) `
+  -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -MultipleInstances IgnoreNew
+
+Set-ScheduledTask `
+  -TaskName "AstraMeter Fronius Marstek Bridge" `
+  -Settings $settings
+```
+
+Without the two battery-power switches, Task Scheduler can terminate the
+controller with status `0xC000013A` and leave the task ready but not running.
+
 The battery is identified by its stable BLE MAC/device suffix. Its last known
 address is read from `.marstek-direct-ip`; reserve that address for the battery
 in the router so DHCP does not change it.
