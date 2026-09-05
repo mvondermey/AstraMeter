@@ -193,6 +193,12 @@ class MarstekClient:
                         return payload
             except TimeoutError:
                 if attempt >= self.request_attempts:
+                    # A Venus E may stop replying to an otherwise valid,
+                    # source-port-pinned UDP socket while remaining reachable
+                    # in the app and via ICMP.  Do not carry that socket into
+                    # the next control cycle; the next request will bind a
+                    # fresh socket to the configured OpenAPI port.
+                    self.close()
                     raise
                 LOGGER.warning(
                     "%s timed out (attempt %d/%d); retrying after API gap",
@@ -365,9 +371,7 @@ def run(args: argparse.Namespace) -> int:
                             args.feedback_gain,
                         )
                     else:
-                        target = calculate_target(
-                            p_grid, args.deadband, args.max_power
-                        )
+                        target = calculate_target(p_grid, args.deadband, args.max_power)
                     try:
                         accepted = client.set_passive(target, args.command_ttl)
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
