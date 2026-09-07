@@ -332,6 +332,92 @@ class MarstekClient:
                 self._last_request_finished = time.monotonic()
         raise RuntimeError("unreachable request retry state")
 
+    def request_many(
+        self,
+        method: str,
+        requests: list[tuple[str, dict[str, Any]]],
+    ) -> list[dict[str, Any] | Exception]:
+        """Send one request per battery together and demultiplex the replies."""
+        if not requests:
+            return []
+        if len({target for target, _params in requests}) != len(requests):
+            raise ValueError("parallel requests require unique target addresses")
+        if self.request_attempts < 1:
+            raise ValueError("request_attempts must be at least 1")
+
+        results: list[dict[str, Any] | Exception | None] = [None] * len(requests)
+        pending = set(range(len(requests)))
+        for attempt in range(1, self.request_attempts + 1):
+            delay = required_request_delay(
+                self._last_request_finished,
+                time.monotonic(),
+                self.minimum_request_gap,
+            )
+            if delay:
+                time.sleep(delay)
+
+            sock = self._get_socket()
+            request_ids: dict[int, tuple[int, str]] = {}
+            for index in tuple(pending):
+                target, params = requests[index]
+                request_id = self._next_id()
+                message = json.dumps(
+                    {"id": request_id, "method": method, "params": params},
+                    separators=(",", ":"),
+                ).encode()
+                try:
+                    sock.sendto(message, (target, self.port))
+                    request_ids[request_id] = (index, target)
+                except OSError as exc:
+                    results[index] = exc
+                    pending.remove(index)
+
+            deadline = time.monotonic() + self.timeout
+            while request_ids and time.monotonic() < deadline:
+                sock.settimeout(max(0.01, deadline - time.monotonic()))
+                try:
+                    data, address = sock.recvfrom(65535)
+                except TimeoutError:
+                    break
+                try:
+                    payload = json.loads(data.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                response_id = payload.get("id")
+                if not isinstance(response_id, int):
+                    continue
+                match = request_ids.get(response_id)
+                if match is None or address[0] != match[1]:
+                    continue
+                index, _target = match
+                results[index] = payload
+                pending.remove(index)
+                del request_ids[response_id]
+
+            sock.settimeout(self.timeout)
+            self._last_request_finished = time.monotonic()
+            if not pending:
+                break
+            if attempt < self.request_attempts:
+                for index in pending:
+                    target, _params = requests[index]
+                    LOGGER.warning(
+                        "%s to %s timed out (attempt %d/%d); retrying after API gap",
+                        method,
+                        target,
+                        attempt,
+                        self.request_attempts,
+                    )
+
+        if pending:
+            self.close()
+            for index in pending:
+                results[index] = TimeoutError("timed out")
+        return [
+            result if result is not None else RuntimeError("missing request result")
+            for result in results
+        ]
+
     def ensure_ip(self) -> str:
         """Validate the cached address without broadcasting on the LAN."""
         if not self.ip:
@@ -367,6 +453,38 @@ class MarstekClient:
             raise ConnectionError("ES.SetMode response came from an unexpected device")
         return reply.get("result", {}).get("set_result") is True
 
+    def set_passives(
+        self, commands: list[tuple[str, str, int, int]]
+    ) -> list[bool | Exception]:
+        """Set multiple batteries concurrently through the shared UDP socket."""
+        replies = self.request_many(
+            SET_MODE_METHOD,
+            [
+                (
+                    target,
+                    {
+                        "id": 0,
+                        "config": {
+                            "mode": "Passive",
+                            "passive_cfg": {"power": power, "cd_time": duration},
+                        },
+                    },
+                )
+                for target, _expected_id, power, duration in commands
+            ],
+        )
+        results: list[bool | Exception] = []
+        for reply, (_target, expected_id, _power, _duration) in zip(
+            replies, commands, strict=True
+        ):
+            if isinstance(reply, Exception):
+                results.append(reply)
+            elif not device_matches(reply, expected_id):
+                results.append(ConnectionError("Unexpected ES.SetMode device response"))
+            else:
+                results.append(reply.get("result", {}).get("set_result") is True)
+        return results
+
     def get_mode(
         self, target: str | None = None, expected_id: str | None = None
     ) -> dict[str, Any]:
@@ -384,6 +502,36 @@ class MarstekClient:
         if not isinstance(soc, (int, float)) or not 0 <= soc <= 100:
             raise ValueError(f"ES.GetMode returned an invalid SOC: {soc!r}")
         return result
+
+    def get_modes(
+        self, batteries: list[tuple[str, str]]
+    ) -> list[dict[str, Any] | Exception]:
+        """Read multiple batteries concurrently through the shared UDP socket."""
+        replies = self.request_many(
+            GET_MODE_METHOD,
+            [(target, {"id": 0}) for target, _expected_id in batteries],
+        )
+        results: list[dict[str, Any] | Exception] = []
+        for reply, (_target, expected_id) in zip(replies, batteries, strict=True):
+            if isinstance(reply, Exception):
+                results.append(reply)
+                continue
+            try:
+                if not device_matches(reply, expected_id):
+                    raise ConnectionError("Unexpected ES.GetMode device response")
+                result = reply.get("result")
+                if not isinstance(result, dict) or result.get("id") != 0:
+                    raise ValueError("ES.GetMode returned an invalid result")
+                mode = result.get("mode")
+                if not isinstance(mode, str) or mode.lower() not in VALID_MODES:
+                    raise ValueError(f"ES.GetMode returned an invalid mode: {mode!r}")
+                soc = result.get("bat_soc")
+                if not isinstance(soc, (int, float)) or not 0 <= soc <= 100:
+                    raise ValueError(f"ES.GetMode returned an invalid SOC: {soc!r}")
+                results.append(result)
+            except (ConnectionError, ValueError) as exc:
+                results.append(exc)
+        return results
 
 
 def read_fronius(host: str, timeout: float = 3.0) -> float:
@@ -520,20 +668,24 @@ def run(args: argparse.Namespace) -> int:
             else:
                 active_batteries: list[tuple[str, str]] = []
                 mode_statuses: list[dict[str, Any]] = []
-                for battery_ip, battery_id in batteries:
+                if len(batteries) == 1:
                     try:
-                        if len(batteries) == 1:
-                            status = client.get_mode()
-                        else:
-                            status = client.get_mode(
-                                target=battery_ip, expected_id=battery_id
-                            )
+                        mode_results: list[dict[str, Any] | Exception] = [
+                            client.get_mode()
+                        ]
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        mode_results = [exc]
+                else:
+                    mode_results = client.get_modes(batteries)
+                for (battery_ip, battery_id), status in zip(
+                    batteries, mode_results, strict=True
+                ):
+                    if isinstance(status, Exception):
                         LOGGER.warning(
                             "Skipping Marstek %s at %s after ES.GetMode failed: %s",
                             battery_id,
                             battery_ip,
-                            exc,
+                            status,
                         )
                         continue
                     active_batteries.append((battery_ip, battery_id))
@@ -560,31 +712,45 @@ def run(args: argparse.Namespace) -> int:
                         target, len(active_batteries), args.max_power
                     )
 
-                accepted_batteries: list[tuple[str, str]] = []
                 target_direction = (
                     -1 if sum(targets) < 0 else 1 if sum(targets) > 0 else 0
                 )
-                for (battery_ip, battery_id), battery_target, current_output in zip(
-                    active_batteries, targets, current_outputs, strict=True
-                ):
+                if len(batteries) == 1:
                     try:
-                        if len(batteries) == 1:
-                            accepted = client.set_passive(
-                                battery_target, args.command_ttl
-                            )
-                        else:
-                            accepted = client.set_passive(
-                                battery_target,
-                                args.command_ttl,
-                                target=battery_ip,
-                                expected_id=battery_id,
-                            )
+                        set_results: list[bool | Exception] = [
+                            client.set_passive(targets[0], args.command_ttl)
+                        ]
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        set_results = [exc]
+                else:
+                    set_results = client.set_passives(
+                        [
+                            (battery_ip, battery_id, battery_target, args.command_ttl)
+                            for (battery_ip, battery_id), battery_target in zip(
+                                active_batteries, targets, strict=True
+                            )
+                        ]
+                    )
+
+                accepted_batteries: list[tuple[str, str]] = []
+                for (
+                    (battery_ip, battery_id),
+                    battery_target,
+                    current_output,
+                    accepted,
+                ) in zip(
+                    active_batteries,
+                    targets,
+                    current_outputs,
+                    set_results,
+                    strict=True,
+                ):
+                    if isinstance(accepted, Exception):
                         LOGGER.warning(
                             "Skipping Marstek %s at %s after ES.SetMode failed: %s",
                             battery_id,
                             battery_ip,
-                            exc,
+                            accepted,
                         )
                         continue
                     if not accepted:
@@ -636,22 +802,30 @@ def run(args: argparse.Namespace) -> int:
         if not args.dry_run and client.ip:
             time.sleep(5.0)
             reset_count = 0
-            for battery_ip, battery_id in batteries:
+            if len(batteries) == 1:
                 try:
-                    if len(batteries) == 1:
-                        client.set_passive(0, 10)
-                    else:
-                        client.set_passive(
-                            0, 10, target=battery_ip, expected_id=battery_id
-                        )
-                    reset_count += 1
+                    reset_results: list[bool | Exception] = [client.set_passive(0, 10)]
                 except (OSError, ValueError, json.JSONDecodeError):
+                    reset_results = [TimeoutError("reset failed")]
+            else:
+                reset_results = client.set_passives(
+                    [
+                        (battery_ip, battery_id, 0, 10)
+                        for battery_ip, battery_id in batteries
+                    ]
+                )
+            for (battery_ip, battery_id), reset_result in zip(
+                batteries, reset_results, strict=True
+            ):
+                if isinstance(reset_result, Exception) or not reset_result:
                     LOGGER.warning(
                         "Could not reset Marstek %s at %s to 0W; "
                         "previous command will expire",
                         battery_id,
                         battery_ip,
                     )
+                    continue
+                reset_count += 1
             LOGGER.info(
                 "Controller stopped; reset %d/%d Marstek setpoints to 0W",
                 reset_count,

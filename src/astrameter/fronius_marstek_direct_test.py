@@ -276,6 +276,14 @@ def test_run_aggregates_and_splits_two_batteries(tmp_path, monkeypatch) -> None:
                 "bat_soc": 50,
             }
 
+        def get_modes(
+            self, batteries: list[tuple[str, str]]
+        ) -> list[dict[str, object] | Exception]:
+            return [
+                self.get_mode(target=target, expected_id=expected_id)
+                for target, expected_id in batteries
+            ]
+
         def set_passive(
             self,
             power: int,
@@ -285,6 +293,14 @@ def test_run_aggregates_and_splits_two_batteries(tmp_path, monkeypatch) -> None:
         ) -> bool:
             set_calls.append((target, power, duration))
             return True
+
+        def set_passives(
+            self, commands: list[tuple[str, str, int, int]]
+        ) -> list[bool | Exception]:
+            return [
+                self.set_passive(power, duration, target, expected_id)
+                for target, expected_id, power, duration in commands
+            ]
 
         def close(self) -> None:
             pass
@@ -344,6 +360,17 @@ def test_run_continues_with_reachable_battery(tmp_path, monkeypatch) -> None:
                 "bat_soc": 45,
             }
 
+        def get_modes(
+            self, batteries: list[tuple[str, str]]
+        ) -> list[dict[str, object] | Exception]:
+            results: list[dict[str, object] | Exception] = []
+            for target, expected_id in batteries:
+                try:
+                    results.append(self.get_mode(target, expected_id))
+                except Exception as exc:
+                    results.append(exc)
+            return results
+
         def set_passive(
             self,
             power: int,
@@ -353,6 +380,14 @@ def test_run_continues_with_reachable_battery(tmp_path, monkeypatch) -> None:
         ) -> bool:
             set_calls.append((target, power, duration))
             return True
+
+        def set_passives(
+            self, commands: list[tuple[str, str, int, int]]
+        ) -> list[bool | Exception]:
+            return [
+                self.set_passive(power, duration, target, expected_id)
+                for target, expected_id, power, duration in commands
+            ]
 
         def close(self) -> None:
             pass
@@ -645,6 +680,56 @@ def test_request_retries_one_timeout(tmp_path, monkeypatch) -> None:
 
     client.close()
     assert sockets[0].closed is True
+
+
+def test_request_many_sends_to_both_batteries_before_receiving(
+    tmp_path, monkeypatch
+) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    client = MarstekClient(
+        "5037cd7f1d02",
+        30000,
+        state_file,
+        minimum_request_gap=0,
+        request_attempts=1,
+    )
+    sent: list[tuple[dict[str, object], tuple[str, int]]] = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.receive_index = 0
+
+        def bind(self, address):
+            assert address == ("0.0.0.0", 30000)
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendto(self, message, destination):
+            sent.append((direct.json.loads(message), destination))
+
+        def recvfrom(self, size):
+            assert len(sent) == 2
+            message, destination = sent[self.receive_index]
+            self.receive_index += 1
+            response = direct.json.dumps({"id": message["id"], "result": {}})
+            return response.encode(), destination
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(direct.socket, "socket", lambda *args: FakeSocket())
+
+    replies = client.request_many(
+        "ES.GetMode",
+        [
+            ("192.168.1.95", {"id": 0}),
+            ("192.168.1.91", {"id": 0}),
+        ],
+    )
+
+    assert [reply["id"] for reply in replies if isinstance(reply, dict)] == [1, 2]
 
 
 def test_request_recreates_socket_after_all_attempts_timeout(
