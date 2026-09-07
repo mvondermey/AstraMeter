@@ -20,6 +20,7 @@ import socket
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -564,8 +565,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--additional-battery",
         action="append",
         default=[],
-        metavar="IP,DEVICE_ID",
-        help="additional Marstek at a fixed IP (repeatable)",
+        metavar="IP,DEVICE_ID[,PORT]",
+        help="additional Marstek at a fixed IP and optional API port (repeatable)",
     )
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--interval", type=float, default=5.0)
@@ -617,27 +618,53 @@ def run(args: argparse.Namespace) -> int:
     previous_targets: dict[tuple[str, str], int] = {}
     additional_batteries: list[tuple[str, str]] = []
     batteries: list[tuple[str, str]] = []
+    battery_ports: dict[tuple[str, str], int] = {}
 
     for value in args.additional_battery:
         try:
-            battery_ip, battery_id = (part.strip() for part in value.split(",", 1))
+            parts = [part.strip() for part in value.split(",")]
+            if len(parts) not in (2, 3):
+                raise ValueError
+            battery_ip, battery_id = parts[:2]
             battery_ip = str(ipaddress.ip_address(battery_ip))
             if not battery_id:
                 raise ValueError
+            battery_port = int(parts[2]) if len(parts) == 3 else args.port
+            if not 1 <= battery_port <= 65535:
+                raise ValueError
         except ValueError as exc:
-            raise ValueError("--additional-battery must use IP,DEVICE_ID") from exc
-        additional_batteries.append((battery_ip, battery_id))
+            raise ValueError(
+                "--additional-battery must use IP,DEVICE_ID[,PORT]"
+            ) from exc
+        battery = (battery_ip, battery_id)
+        additional_batteries.append(battery)
+        battery_ports[battery] = battery_port
 
     if not client.ip:
         raise ConnectionError("Marstek IP is not known; state file is empty")
     batteries = [(client.ip, args.device_id), *additional_batteries]
+    battery_ports[(client.ip, args.device_id)] = args.port
+    clients_by_port = {args.port: client}
+    for battery in additional_batteries:
+        battery_port = battery_ports[battery]
+        if battery_port not in clients_by_port:
+            clients_by_port[battery_port] = MarstekClient(
+                battery[1],
+                battery_port,
+                args.state_file,
+                minimum_request_gap=args.api_request_gap,
+            )
     for index, (battery_ip, battery_id) in enumerate(batteries):
+        battery_port = battery_ports[(battery_ip, battery_id)]
+        battery_client = clients_by_port[battery_port]
         try:
             if index == 0:
-                client.ensure_ip()
+                battery_client.ensure_ip()
             else:
-                client.ensure_device(battery_ip, battery_id)
-            LOGGER.info("Marstek %s found at %s:%d", battery_id, battery_ip, args.port)
+                battery_client.ensure_device(battery_ip, battery_id)
+            LOGGER.info(
+                "Marstek %s found at %s:%d", battery_id, battery_ip, battery_port
+            )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             LOGGER.warning(
                 "Initial validation failed for Marstek %s at %s: %s; "
@@ -649,6 +676,7 @@ def run(args: argparse.Namespace) -> int:
     # Venus E 3.0 firmware is sensitive to back-to-back UDP requests.
     # Leave a full device processing window after the startup identity checks.
     time.sleep(5.0)
+    executor = ThreadPoolExecutor(max_workers=len(clients_by_port))
 
     while not stop_event.is_set():
         started = time.monotonic()
@@ -675,6 +703,29 @@ def run(args: argparse.Namespace) -> int:
                         ]
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
                         mode_results = [exc]
+                elif len(clients_by_port) > 1:
+                    mode_results = [RuntimeError("mode not read")] * len(batteries)
+                    mode_groups: dict[int, list[tuple[int, tuple[str, str]]]] = {}
+                    for battery_index, battery in enumerate(batteries):
+                        mode_groups.setdefault(battery_ports[battery], []).append(
+                            (battery_index, battery)
+                        )
+                    mode_futures = {
+                        executor.submit(
+                            clients_by_port[port].get_modes,
+                            [battery for _index, battery in members],
+                        ): members
+                        for port, members in mode_groups.items()
+                    }
+                    for future, members in mode_futures.items():
+                        try:
+                            group_results = future.result()
+                        except Exception as exc:
+                            group_results = [exc] * len(members)
+                        for (battery_index, _battery), result in zip(
+                            members, group_results, strict=True
+                        ):
+                            mode_results[battery_index] = result
                 else:
                     mode_results = client.get_modes(batteries)
                 for (battery_ip, battery_id), status in zip(
@@ -722,6 +773,43 @@ def run(args: argparse.Namespace) -> int:
                         ]
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
                         set_results = [exc]
+                elif len(clients_by_port) > 1:
+                    set_results = [RuntimeError("setpoint not sent")] * len(
+                        active_batteries
+                    )
+                    command_groups: dict[
+                        int, list[tuple[int, tuple[str, str], int]]
+                    ] = {}
+                    for command_index, (battery, battery_target) in enumerate(
+                        zip(active_batteries, targets, strict=True)
+                    ):
+                        command_groups.setdefault(battery_ports[battery], []).append(
+                            (command_index, battery, battery_target)
+                        )
+                    command_futures = {
+                        executor.submit(
+                            clients_by_port[port].set_passives,
+                            [
+                                (
+                                    battery[0],
+                                    battery[1],
+                                    battery_target,
+                                    args.command_ttl,
+                                )
+                                for _index, battery, battery_target in members
+                            ],
+                        ): members
+                        for port, members in command_groups.items()
+                    }
+                    for future, members in command_futures.items():
+                        try:
+                            group_results = future.result()
+                        except Exception as exc:
+                            group_results = [exc] * len(members)
+                        for (command_index, _battery, _target), result in zip(
+                            members, group_results, strict=True
+                        ):
+                            set_results[command_index] = result
                 else:
                     set_results = client.set_passives(
                         [
@@ -775,7 +863,10 @@ def run(args: argparse.Namespace) -> int:
                     "cycle ok P_Grid=%.0fW batteries=%s modes=%s "
                     "previous_outputs=%sW targets=%sW socs=%s%%",
                     p_grid,
-                    [battery_ip for battery_ip, _battery_id in active_batteries],
+                    [
+                        f"{battery_ip}:{battery_ports[(battery_ip, battery_id)]}"
+                        for battery_ip, battery_id in active_batteries
+                    ],
                     [status["mode"] for status in mode_statuses],
                     current_outputs,
                     targets,
@@ -807,6 +898,32 @@ def run(args: argparse.Namespace) -> int:
                     reset_results: list[bool | Exception] = [client.set_passive(0, 10)]
                 except (OSError, ValueError, json.JSONDecodeError):
                     reset_results = [TimeoutError("reset failed")]
+            elif len(clients_by_port) > 1:
+                reset_results = [RuntimeError("reset not sent")] * len(batteries)
+                reset_groups: dict[int, list[tuple[int, tuple[str, str]]]] = {}
+                for battery_index, battery in enumerate(batteries):
+                    reset_groups.setdefault(battery_ports[battery], []).append(
+                        (battery_index, battery)
+                    )
+                reset_futures = {
+                    executor.submit(
+                        clients_by_port[port].set_passives,
+                        [
+                            (battery[0], battery[1], 0, 10)
+                            for _index, battery in members
+                        ],
+                    ): members
+                    for port, members in reset_groups.items()
+                }
+                for future, members in reset_futures.items():
+                    try:
+                        group_results = future.result()
+                    except Exception as exc:
+                        group_results = [exc] * len(members)
+                    for (battery_index, _battery), result in zip(
+                        members, group_results, strict=True
+                    ):
+                        reset_results[battery_index] = result
             else:
                 reset_results = client.set_passives(
                     [
@@ -832,7 +949,9 @@ def run(args: argparse.Namespace) -> int:
                 len(batteries),
             )
     finally:
-        client.close()
+        executor.shutdown(wait=True)
+        for battery_client in clients_by_port.values():
+            battery_client.close()
     return 0
 
 

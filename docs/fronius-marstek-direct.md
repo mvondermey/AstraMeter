@@ -53,8 +53,8 @@ equal share of the grid correction to each battery's own reported output while
 keeping the per-battery `--max-power` limit. All active targets follow the same
 aggregate charge or discharge direction, so batteries do not work against each
 other. Status reads and commands are sent concurrently to the configured
-batteries through one shared, response-ID-aware UDP socket, so adding a battery
-does not serialize another full API delay into every control cycle. If a battery
+batteries through response-ID-aware UDP channels, so adding a battery does not
+serialize another full API delay into every control cycle. If a battery
 delivers less than half of its previous substantial command because it is full,
 empty, or otherwise constrained, its unused share is moved to responsive
 batteries on the next cycle. If one battery stops answering, reachable batteries
@@ -63,6 +63,17 @@ continue operating and the unavailable battery is retried on the next cycle:
 ```powershell
 .venv\Scripts\python.exe -m astrameter.fronius_marstek_direct `
   --additional-battery 192.168.178.91,ccc837274c83
+```
+
+If batteries use different Local API ports, append the port to the additional
+battery and set `--port` to the primary battery's port. The controller opens one
+UDP channel per port and runs those channels concurrently while retaining one
+coordinated power calculation:
+
+```powershell
+.venv\Scripts\python.exe -m astrameter.fronius_marstek_direct `
+  --port 30001 `
+  --additional-battery 192.168.178.91,ccc837274c83,30000
 ```
 
 On Windows systems with Smart App Control or WDAC enabled, use an officially

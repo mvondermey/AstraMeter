@@ -333,6 +333,80 @@ def test_run_aggregates_and_splits_two_batteries(tmp_path, monkeypatch) -> None:
     ]
 
 
+def test_run_uses_independent_clients_for_different_battery_ports(
+    tmp_path, monkeypatch
+) -> None:
+    set_calls: list[tuple[int, str, int, int]] = []
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, _device_id, port, *_args, **_kwargs) -> None:
+            self.port = port
+
+        def ensure_ip(self) -> str:
+            return self.ip
+
+        def ensure_device(self, target: str, expected_id: str) -> str:
+            assert (target, expected_id) == ("192.168.1.91", "second")
+            return target
+
+        def get_modes(
+            self, batteries: list[tuple[str, str]]
+        ) -> list[dict[str, object] | Exception]:
+            output = 1000 if self.port == 30001 else 500
+            return [
+                {
+                    "id": 0,
+                    "mode": "Passive",
+                    "ongrid_power": output,
+                    "bat_soc": 50,
+                }
+                for _battery in batteries
+            ]
+
+        def set_passives(
+            self, commands: list[tuple[str, str, int, int]]
+        ) -> list[bool | Exception]:
+            for target, _expected_id, power, duration in commands:
+                set_calls.append((self.port, target, power, duration))
+            return [True] * len(commands)
+
+        def close(self) -> None:
+            pass
+
+    args = direct.build_parser().parse_args(
+        [
+            "--once",
+            "--meter-sees-battery",
+            "--feedback-gain",
+            "0.5",
+            "--port",
+            "30001",
+            "--additional-battery",
+            "192.168.1.91,second,30000",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", lambda _host: 1000)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert sorted(set_calls) == sorted(
+        [
+            (30001, "192.168.1.95", 1250, 45),
+            (30000, "192.168.1.91", 750, 45),
+            (30001, "192.168.1.95", 0, 10),
+            (30000, "192.168.1.91", 0, 10),
+        ]
+    )
+
+
 def test_run_continues_with_reachable_battery(tmp_path, monkeypatch) -> None:
     set_calls: list[tuple[str | None, int, int]] = []
 
