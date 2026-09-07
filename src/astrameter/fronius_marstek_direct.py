@@ -69,6 +69,50 @@ def calculate_feedback_target(
     return max(-max_power, min(max_power, target))
 
 
+def calculate_feedback_targets(
+    p_grid: float,
+    current_outputs: list[float],
+    deadband: int,
+    max_power: int,
+    gain: float = 1.0,
+) -> list[int]:
+    """Correct each battery from its own measured output baseline."""
+    if not current_outputs:
+        raise ValueError("current_outputs must contain at least one battery")
+    if not math.isfinite(p_grid):
+        raise ValueError("Fronius P_Grid is not finite")
+    if not all(math.isfinite(output) for output in current_outputs):
+        raise ValueError("Marstek ongrid_power is not finite")
+    if not math.isfinite(gain) or not 0 < gain <= 1:
+        raise ValueError("feedback gain must be greater than zero and at most one")
+    correction = 0.0 if abs(p_grid) < deadband else gain * p_grid
+    correction_per_battery = correction / len(current_outputs)
+    return [
+        max(-max_power, min(max_power, round(output + correction_per_battery)))
+        for output in current_outputs
+    ]
+
+
+def distribute_target(
+    total_target: int, battery_count: int, max_power: int
+) -> list[int]:
+    """Split one aggregate target evenly across identical batteries."""
+    if battery_count < 1:
+        raise ValueError("battery_count must be at least 1")
+    if max_power < 1:
+        raise ValueError("max_power must be at least 1")
+    bounded = max(
+        -battery_count * max_power, min(battery_count * max_power, total_target)
+    )
+    sign = -1 if bounded < 0 else 1
+    magnitude = abs(bounded)
+    base, remainder = divmod(magnitude, battery_count)
+    return [
+        sign * (base + (1 if index < remainder else 0))
+        for index in range(battery_count)
+    ]
+
+
 def required_request_delay(
     last_finished: float, now: float, minimum_gap: float
 ) -> float:
@@ -201,8 +245,9 @@ class MarstekClient:
                     self.close()
                     raise
                 LOGGER.warning(
-                    "%s timed out (attempt %d/%d); retrying after API gap",
+                    "%s to %s timed out (attempt %d/%d); retrying after API gap",
                     method,
+                    destination,
                     attempt,
                     self.request_attempts,
                 )
@@ -219,18 +264,38 @@ class MarstekClient:
             raise ConnectionError(f"Unexpected device at {self.ip}")
         return self.ip
 
-    def set_passive(self, power: int, duration: int) -> bool:
+    def ensure_device(self, target: str, expected_id: str) -> str:
+        """Validate a fixed-IP additional battery without LAN broadcast."""
+        target = str(ipaddress.ip_address(target))
+        reply = self.request("Wifi.GetStatus", {"id": 0}, target=target)
+        if not device_matches(reply, expected_id):
+            raise ConnectionError(f"Unexpected device at {target}")
+        return target
+
+    def set_passive(
+        self,
+        power: int,
+        duration: int,
+        target: str | None = None,
+        expected_id: str | None = None,
+    ) -> bool:
         config = {
             "mode": "Passive",
             "passive_cfg": {"power": power, "cd_time": duration},
         }
-        reply = self.request(SET_MODE_METHOD, {"id": 0, "config": config})
+        reply = self.request(
+            SET_MODE_METHOD, {"id": 0, "config": config}, target=target
+        )
+        if expected_id and not device_matches(reply, expected_id):
+            raise ConnectionError("ES.SetMode response came from an unexpected device")
         return reply.get("result", {}).get("set_result") is True
 
-    def get_mode(self) -> dict[str, Any]:
+    def get_mode(
+        self, target: str | None = None, expected_id: str | None = None
+    ) -> dict[str, Any]:
         """Read and validate mode state before issuing a write command."""
-        reply = self.request(GET_MODE_METHOD, {"id": 0})
-        if not device_matches(reply, self.device_id):
+        reply = self.request(GET_MODE_METHOD, {"id": 0}, target=target)
+        if not device_matches(reply, expected_id or self.device_id):
             raise ConnectionError("ES.GetMode response came from an unexpected device")
         result = reply.get("result")
         if not isinstance(result, dict) or result.get("id") != 0:
@@ -270,6 +335,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fronius-host", default="pv.fritz.box")
     parser.add_argument("--device-id", default="5037cd7f1d02")
+    parser.add_argument(
+        "--additional-battery",
+        action="append",
+        default=[],
+        metavar="IP,DEVICE_ID",
+        help="additional Marstek at a fixed IP (repeatable)",
+    )
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--api-request-gap", type=float, default=MIN_REQUEST_GAP)
@@ -317,77 +389,143 @@ def run(args: argparse.Namespace) -> int:
         minimum_request_gap=args.api_request_gap,
     )
     failures = 0
-    needs_probe = False
+    additional_batteries: list[tuple[str, str]] = []
+    batteries: list[tuple[str, str]] = []
 
-    try:
-        marstek_ip = client.ensure_ip()
-        LOGGER.info("Marstek %s found at %s:%d", args.device_id, marstek_ip, args.port)
-        # Venus E 3.0 firmware is sensitive to back-to-back UDP requests.
-        # Leave a full device processing window after the startup identity check.
-        time.sleep(5.0)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        LOGGER.warning("Initial Marstek validation failed: %s", exc)
-        needs_probe = True
+    for value in args.additional_battery:
+        try:
+            battery_ip, battery_id = (part.strip() for part in value.split(",", 1))
+            battery_ip = str(ipaddress.ip_address(battery_ip))
+            if not battery_id:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("--additional-battery must use IP,DEVICE_ID") from exc
+        additional_batteries.append((battery_ip, battery_id))
+
+    if not client.ip:
+        raise ConnectionError("Marstek IP is not known; state file is empty")
+    batteries = [(client.ip, args.device_id), *additional_batteries]
+    for index, (battery_ip, battery_id) in enumerate(batteries):
+        try:
+            if index == 0:
+                client.ensure_ip()
+            else:
+                client.ensure_device(battery_ip, battery_id)
+            LOGGER.info("Marstek %s found at %s:%d", battery_id, battery_ip, args.port)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning(
+                "Initial validation failed for Marstek %s at %s: %s; "
+                "direct mode checks will continue",
+                battery_id,
+                battery_ip,
+                exc,
+            )
+    # Venus E 3.0 firmware is sensitive to back-to-back UDP requests.
+    # Leave a full device processing window after the startup identity checks.
+    time.sleep(5.0)
 
     while not stop_event.is_set():
         started = time.monotonic()
         try:
-            if needs_probe:
-                client.ensure_ip()
-                LOGGER.info("Marstek API probe succeeded; writing resumes next cycle")
-                needs_probe = False
-                failures = 0
+            try:
+                p_grid = read_fronius(args.fronius_host)
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise FroniusReadError(str(exc)) from exc
+            if args.dry_run:
+                target = calculate_target(p_grid, args.deadband, args.max_power)
+                LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
             else:
-                try:
-                    p_grid = read_fronius(args.fronius_host)
-                except (
-                    OSError,
-                    ValueError,
-                    KeyError,
-                    json.JSONDecodeError,
-                ) as exc:
-                    raise FroniusReadError(str(exc)) from exc
-                if args.dry_run:
-                    target = calculate_target(p_grid, args.deadband, args.max_power)
-                    LOGGER.info("dry-run P_Grid=%.0fW target=%dW", p_grid, target)
-                else:
+                active_batteries: list[tuple[str, str]] = []
+                mode_statuses: list[dict[str, Any]] = []
+                for battery_ip, battery_id in batteries:
                     try:
-                        mode_status = client.get_mode()
+                        if len(batteries) == 1:
+                            status = client.get_mode()
+                        else:
+                            status = client.get_mode(
+                                target=battery_ip, expected_id=battery_id
+                            )
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
-                        raise RuntimeError(f"ES.GetMode failed: {exc}") from exc
-                    LOGGER.debug(
-                        "ES.GetMode mode=%s ongrid_power=%sW soc=%s%%",
-                        mode_status["mode"],
-                        mode_status.get("ongrid_power"),
-                        mode_status.get("bat_soc"),
-                    )
-                    if args.meter_sees_battery:
-                        current_output = float(mode_status.get("ongrid_power", 0))
-                        target = calculate_feedback_target(
-                            p_grid,
-                            current_output,
-                            args.deadband,
-                            args.max_power,
-                            args.feedback_gain,
+                        LOGGER.warning(
+                            "Skipping Marstek %s at %s after ES.GetMode failed: %s",
+                            battery_id,
+                            battery_ip,
+                            exc,
                         )
-                    else:
-                        target = calculate_target(p_grid, args.deadband, args.max_power)
-                    try:
-                        accepted = client.set_passive(target, args.command_ttl)
-                    except (OSError, ValueError, json.JSONDecodeError) as exc:
-                        raise RuntimeError(f"ES.SetMode failed: {exc}") from exc
-                    if not accepted:
-                        raise RuntimeError("Marstek rejected ES.SetMode")
-                    LOGGER.info(
-                        "cycle ok P_Grid=%.0fW mode=%s previous_output=%sW "
-                        "target=%dW soc=%s%%",
+                        continue
+                    active_batteries.append((battery_ip, battery_id))
+                    mode_statuses.append(status)
+                if not active_batteries:
+                    raise RuntimeError("ES.GetMode failed for every configured battery")
+
+                current_outputs = [
+                    float(status.get("ongrid_power", 0)) for status in mode_statuses
+                ]
+                total_limit = args.max_power * len(active_batteries)
+                if args.meter_sees_battery:
+                    targets = calculate_feedback_targets(
                         p_grid,
-                        mode_status["mode"],
-                        mode_status.get("ongrid_power"),
-                        target,
-                        mode_status.get("bat_soc"),
+                        current_outputs,
+                        args.deadband,
+                        args.max_power,
+                        args.feedback_gain,
                     )
-                failures = 0
+                else:
+                    target = calculate_target(p_grid, args.deadband, total_limit)
+                    targets = distribute_target(
+                        target, len(active_batteries), args.max_power
+                    )
+
+                accepted_batteries: list[tuple[str, str]] = []
+                for (battery_ip, battery_id), battery_target in zip(
+                    active_batteries, targets, strict=True
+                ):
+                    try:
+                        if len(batteries) == 1:
+                            accepted = client.set_passive(
+                                battery_target, args.command_ttl
+                            )
+                        else:
+                            accepted = client.set_passive(
+                                battery_target,
+                                args.command_ttl,
+                                target=battery_ip,
+                                expected_id=battery_id,
+                            )
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        LOGGER.warning(
+                            "Skipping Marstek %s at %s after ES.SetMode failed: %s",
+                            battery_id,
+                            battery_ip,
+                            exc,
+                        )
+                        continue
+                    if not accepted:
+                        LOGGER.warning(
+                            "Marstek %s at %s rejected ES.SetMode",
+                            battery_id,
+                            battery_ip,
+                        )
+                        continue
+                    accepted_batteries.append((battery_ip, battery_id))
+                if not accepted_batteries:
+                    raise RuntimeError("ES.SetMode failed for every available battery")
+                LOGGER.info(
+                    "cycle ok P_Grid=%.0fW batteries=%s modes=%s "
+                    "previous_outputs=%sW targets=%sW socs=%s%%",
+                    p_grid,
+                    [battery_ip for battery_ip, _battery_id in active_batteries],
+                    [status["mode"] for status in mode_statuses],
+                    current_outputs,
+                    targets,
+                    [status.get("bat_soc") for status in mode_statuses],
+                )
+            failures = 0
         except FroniusReadError as exc:
             failures += 1
             LOGGER.warning("Fronius read failed (%d): %s", failures, exc)
@@ -399,7 +537,6 @@ def run(args: argparse.Namespace) -> int:
             RuntimeError,
         ) as exc:
             failures += 1
-            needs_probe = True
             LOGGER.warning("Control cycle failed (%d): %s", failures, exc)
         if args.once:
             break
@@ -407,14 +544,29 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         if not args.dry_run and client.ip:
-            try:
-                time.sleep(5.0)
-                client.set_passive(0, 10)
-                LOGGER.info("Controller stopped; Marstek setpoint reset to 0W")
-            except (OSError, ValueError, json.JSONDecodeError):
-                LOGGER.warning(
-                    "Could not send final 0W setpoint; previous command will expire"
-                )
+            time.sleep(5.0)
+            reset_count = 0
+            for battery_ip, battery_id in batteries:
+                try:
+                    if len(batteries) == 1:
+                        client.set_passive(0, 10)
+                    else:
+                        client.set_passive(
+                            0, 10, target=battery_ip, expected_id=battery_id
+                        )
+                    reset_count += 1
+                except (OSError, ValueError, json.JSONDecodeError):
+                    LOGGER.warning(
+                        "Could not reset Marstek %s at %s to 0W; "
+                        "previous command will expire",
+                        battery_id,
+                        battery_ip,
+                    )
+            LOGGER.info(
+                "Controller stopped; reset %d/%d Marstek setpoints to 0W",
+                reset_count,
+                len(batteries),
+            )
     finally:
         client.close()
     return 0

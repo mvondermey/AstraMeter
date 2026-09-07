@@ -47,6 +47,18 @@ Run continuously:
 .venv\Scripts\python.exe -m astrameter.fronius_marstek_direct
 ```
 
+Additional batteries can share the same aggregate Fronius feedback loop. Give
+each additional battery's fixed IP and device suffix; the controller applies an
+equal share of the grid correction to each battery's own reported output while
+keeping the per-battery `--max-power` limit. If one battery stops answering,
+reachable batteries continue operating and the unavailable battery is retried
+on the next cycle:
+
+```powershell
+.venv\Scripts\python.exe -m astrameter.fronius_marstek_direct `
+  --additional-battery 192.168.178.91,ccc837274c83
+```
+
 On Windows systems with Smart App Control or WDAC enabled, use an officially
 signed Python installation for unattended tasks. Some standalone `uv` Python
 runtimes may be rejected with Code Integrity events 3033/3077 even though an

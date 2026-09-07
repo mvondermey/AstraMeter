@@ -8,8 +8,10 @@ from . import fronius_marstek_direct as direct
 from .fronius_marstek_direct import (
     MarstekClient,
     calculate_feedback_target,
+    calculate_feedback_targets,
     calculate_target,
     device_matches,
+    distribute_target,
     extract_p_grid,
     required_request_delay,
 )
@@ -26,6 +28,13 @@ def test_calculate_target_sign_deadband_and_limit() -> None:
 def test_calculate_target_rejects_non_finite() -> None:
     with pytest.raises(ValueError):
         calculate_target(float("nan"), 50, 2500)
+
+
+def test_distribute_target_evenly_and_bound_per_battery() -> None:
+    assert distribute_target(4001, 2, 2500) == [2001, 2000]
+    assert distribute_target(-4001, 2, 2500) == [-2001, -2000]
+    assert distribute_target(6000, 2, 2500) == [2500, 2500]
+    assert distribute_target(1, 2, 2500) == [1, 0]
 
 
 def test_calculate_feedback_target_corrects_existing_output() -> None:
@@ -51,6 +60,21 @@ def test_calculate_feedback_target_rejects_non_finite_output() -> None:
 def test_calculate_feedback_target_rejects_invalid_gain() -> None:
     with pytest.raises(ValueError, match="feedback gain"):
         calculate_feedback_target(100, 0, 50, 2500, 0)
+
+
+def test_calculate_feedback_targets_preserves_each_battery_baseline() -> None:
+    assert calculate_feedback_targets(1000, [0, 800], 50, 2500, 0.5) == [
+        250,
+        1050,
+    ]
+    assert calculate_feedback_targets(-1000, [0, -800], 50, 2500, 0.5) == [
+        -250,
+        -1050,
+    ]
+    assert calculate_feedback_targets(5000, [0, 2000], 50, 2500, 1.0) == [
+        2500,
+        2500,
+    ]
 
 
 def test_run_uses_closed_loop_feedback_when_meter_sees_battery(
@@ -178,6 +202,145 @@ def test_run_applies_grid_target_independently_of_reported_soc(
     assert set_calls == [(600, 45), (-400, 45), (0, 10)]
 
 
+def test_run_aggregates_and_splits_two_batteries(tmp_path, monkeypatch) -> None:
+    set_calls: list[tuple[str | None, int, int]] = []
+    mode_outputs = {
+        "192.168.1.95": 1000,
+        "192.168.1.91": 500,
+    }
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def ensure_ip(self) -> str:
+            return self.ip
+
+        def ensure_device(self, target: str, expected_id: str) -> str:
+            assert (target, expected_id) == ("192.168.1.91", "second")
+            return target
+
+        def get_mode(
+            self, target: str | None = None, expected_id: str | None = None
+        ) -> dict[str, object]:
+            ip = target or self.ip
+            return {
+                "id": 0,
+                "mode": "Passive",
+                "ongrid_power": mode_outputs[ip],
+                "bat_soc": 50,
+            }
+
+        def set_passive(
+            self,
+            power: int,
+            duration: int,
+            target: str | None = None,
+            expected_id: str | None = None,
+        ) -> bool:
+            set_calls.append((target, power, duration))
+            return True
+
+        def close(self) -> None:
+            pass
+
+    args = direct.build_parser().parse_args(
+        [
+            "--once",
+            "--meter-sees-battery",
+            "--feedback-gain",
+            "0.5",
+            "--additional-battery",
+            "192.168.1.91,second",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", lambda _host: 1000)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert set_calls == [
+        ("192.168.1.95", 1250, 45),
+        ("192.168.1.91", 750, 45),
+        ("192.168.1.95", 0, 10),
+        ("192.168.1.91", 0, 10),
+    ]
+
+
+def test_run_continues_with_reachable_battery(tmp_path, monkeypatch) -> None:
+    set_calls: list[tuple[str | None, int, int]] = []
+
+    class FakeClient:
+        ip = "192.168.1.95"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def ensure_ip(self) -> str:
+            return self.ip
+
+        def ensure_device(self, target: str, expected_id: str) -> str:
+            return target
+
+        def get_mode(
+            self, target: str | None = None, expected_id: str | None = None
+        ) -> dict[str, object]:
+            if target == "192.168.1.95":
+                raise TimeoutError("old battery unavailable")
+            return {
+                "id": 0,
+                "mode": "Passive",
+                "ongrid_power": 500,
+                "bat_soc": 45,
+            }
+
+        def set_passive(
+            self,
+            power: int,
+            duration: int,
+            target: str | None = None,
+            expected_id: str | None = None,
+        ) -> bool:
+            set_calls.append((target, power, duration))
+            return True
+
+        def close(self) -> None:
+            pass
+
+    args = direct.build_parser().parse_args(
+        [
+            "--once",
+            "--meter-sees-battery",
+            "--feedback-gain",
+            "0.5",
+            "--additional-battery",
+            "192.168.1.91,second",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+    monkeypatch.setattr(direct, "MarstekClient", FakeClient)
+    monkeypatch.setattr(direct, "read_fronius", lambda _host: 1000)
+    monkeypatch.setattr(direct.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
+
+    assert direct.run(args) == 0
+    assert set_calls == [
+        ("192.168.1.91", 1000, 45),
+        ("192.168.1.95", 0, 10),
+        ("192.168.1.91", 0, 10),
+    ]
+
+
 def test_fronius_failure_does_not_trigger_marstek_probe(tmp_path, monkeypatch) -> None:
     """A Fronius/DNS outage must not invalidate a reachable Marstek address."""
     ensure_calls = 0
@@ -237,8 +400,10 @@ def test_fronius_failure_does_not_trigger_marstek_probe(tmp_path, monkeypatch) -
     assert ensure_calls == 1
 
 
-def test_marstek_failure_probes_before_resuming_writes(tmp_path, monkeypatch) -> None:
-    """After an API failure, one read-only probe cycle must precede new writes."""
+def test_marstek_failure_retries_directly_without_wifi_probe(
+    tmp_path, monkeypatch
+) -> None:
+    """A mode failure must retry the mode API instead of entering a Wi-Fi probe."""
     ensure_calls = 0
     grid_reads = 0
     get_mode_calls = 0
@@ -249,10 +414,10 @@ def test_marstek_failure_probes_before_resuming_writes(tmp_path, monkeypatch) ->
             self.waits = 0
 
         def is_set(self) -> bool:
-            return self.waits >= 3
+            return self.waits >= 2
 
         def set(self) -> None:
-            self.waits = 3
+            self.waits = 2
 
         def wait(self, _timeout: float) -> None:
             self.waits += 1
@@ -307,7 +472,7 @@ def test_marstek_failure_probes_before_resuming_writes(tmp_path, monkeypatch) ->
     monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
 
     assert direct.run(args) == 0
-    assert ensure_calls == 2
+    assert ensure_calls == 1
     assert grid_reads == 2
     assert get_mode_calls == 2
     assert set_calls == [(500, 45), (500, 45), (0, 10)]
