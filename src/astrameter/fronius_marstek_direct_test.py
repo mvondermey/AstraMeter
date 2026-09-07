@@ -77,6 +77,11 @@ def test_calculate_feedback_targets_preserves_each_battery_baseline() -> None:
     ]
 
 
+def test_calculate_feedback_targets_prevents_charge_discharge_conflict() -> None:
+    assert calculate_feedback_targets(2046, [-2425, -325], 50, 2500, 0.5) == [-1914, 0]
+    assert calculate_feedback_targets(-500, [-1000, 1000], 50, 2500, 0.5) == [-1125, 0]
+
+
 def test_run_uses_closed_loop_feedback_when_meter_sees_battery(
     tmp_path, monkeypatch
 ) -> None:

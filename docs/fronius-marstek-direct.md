@@ -50,7 +50,9 @@ Run continuously:
 Additional batteries can share the same aggregate Fronius feedback loop. Give
 each additional battery's fixed IP and device suffix; the controller applies an
 equal share of the grid correction to each battery's own reported output while
-keeping the per-battery `--max-power` limit. If one battery stops answering,
+keeping the per-battery `--max-power` limit. All active targets follow the same
+aggregate charge or discharge direction, so batteries do not work against each
+other. If one battery stops answering,
 reachable batteries continue operating and the unavailable battery is retried
 on the next cycle:
 

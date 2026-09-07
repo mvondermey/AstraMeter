@@ -76,7 +76,7 @@ def calculate_feedback_targets(
     max_power: int,
     gain: float = 1.0,
 ) -> list[int]:
-    """Correct each battery from its own measured output baseline."""
+    """Correct each battery without commanding opposing power directions."""
     if not current_outputs:
         raise ValueError("current_outputs must contain at least one battery")
     if not math.isfinite(p_grid):
@@ -87,10 +87,16 @@ def calculate_feedback_targets(
         raise ValueError("feedback gain must be greater than zero and at most one")
     correction = 0.0 if abs(p_grid) < deadband else gain * p_grid
     correction_per_battery = correction / len(current_outputs)
-    return [
+    targets = [
         max(-max_power, min(max_power, round(output + correction_per_battery)))
         for output in current_outputs
     ]
+    aggregate_target = sum(current_outputs) + correction
+    if aggregate_target < 0:
+        return [min(0, target) for target in targets]
+    if aggregate_target > 0:
+        return [max(0, target) for target in targets]
+    return [0 for _target in targets]
 
 
 def distribute_target(
