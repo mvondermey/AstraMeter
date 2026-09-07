@@ -7,6 +7,7 @@ import pytest
 from . import fronius_marstek_direct as direct
 from .fronius_marstek_direct import (
     MarstekClient,
+    battery_is_constrained,
     calculate_feedback_target,
     calculate_feedback_targets,
     calculate_target,
@@ -80,6 +81,43 @@ def test_calculate_feedback_targets_preserves_each_battery_baseline() -> None:
 def test_calculate_feedback_targets_prevents_charge_discharge_conflict() -> None:
     assert calculate_feedback_targets(2046, [-2425, -325], 50, 2500, 0.5) == [-1914, 0]
     assert calculate_feedback_targets(-500, [-1000, 1000], 50, 2500, 0.5) == [-1125, 0]
+
+
+def test_calculate_feedback_targets_moves_rejected_charge_to_other_battery() -> None:
+    assert calculate_feedback_targets(
+        -1000,
+        [0, -800],
+        50,
+        2500,
+        0.5,
+        previous_targets=[-1000, -800],
+    ) == [0, -1300]
+
+
+def test_calculate_feedback_targets_moves_rejected_discharge_to_other_battery() -> None:
+    assert calculate_feedback_targets(
+        1000,
+        [0, 800],
+        50,
+        2500,
+        0.5,
+        previous_targets=[1000, 800],
+    ) == [0, 1300]
+
+
+def test_constrained_battery_stays_excluded_until_direction_changes() -> None:
+    assert battery_is_constrained(0, -1000, -1, 50)
+    assert not battery_is_constrained(0, -1000, 1, 50)
+    assert not battery_is_constrained(-600, -1000, -1, 50)
+
+
+def test_calculate_feedback_targets_does_not_assume_saturation_without_history() -> (
+    None
+):
+    assert calculate_feedback_targets(-1000, [0, -800], 50, 2500, 0.5) == [
+        -250,
+        -1050,
+    ]
 
 
 def test_run_uses_closed_loop_feedback_when_meter_sees_battery(

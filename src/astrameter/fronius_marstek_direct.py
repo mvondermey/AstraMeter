@@ -69,14 +69,36 @@ def calculate_feedback_target(
     return max(-max_power, min(max_power, target))
 
 
+def battery_is_constrained(
+    current_output: float,
+    previous_target: int | None,
+    direction: int,
+    deadband: int,
+) -> bool:
+    """Return whether a battery delivered less than half its prior command."""
+    if previous_target is None or direction == 0:
+        return False
+    return (
+        previous_target * direction > deadband
+        and abs(current_output) < abs(previous_target) * 0.5
+    )
+
+
 def calculate_feedback_targets(
     p_grid: float,
     current_outputs: list[float],
     deadband: int,
     max_power: int,
     gain: float = 1.0,
+    previous_targets: list[int | None] | None = None,
 ) -> list[int]:
-    """Correct each battery without commanding opposing power directions."""
+    """Correct each battery and move rejected power to responsive batteries.
+
+    A battery is treated as constrained when it delivers less than half of a
+    substantial previous command. This lets a full/empty battery drop out of
+    the allocation on the next cycle instead of receiving an equal share of
+    every correction indefinitely.
+    """
     if not current_outputs:
         raise ValueError("current_outputs must contain at least one battery")
     if not math.isfinite(p_grid):
@@ -85,18 +107,67 @@ def calculate_feedback_targets(
         raise ValueError("Marstek ongrid_power is not finite")
     if not math.isfinite(gain) or not 0 < gain <= 1:
         raise ValueError("feedback gain must be greater than zero and at most one")
+    if previous_targets is not None and len(previous_targets) != len(current_outputs):
+        raise ValueError("previous_targets must match current_outputs")
     correction = 0.0 if abs(p_grid) < deadband else gain * p_grid
-    correction_per_battery = correction / len(current_outputs)
-    targets = [
-        max(-max_power, min(max_power, round(output + correction_per_battery)))
-        for output in current_outputs
-    ]
-    aggregate_target = sum(current_outputs) + correction
-    if aggregate_target < 0:
-        return [min(0, target) for target in targets]
-    if aggregate_target > 0:
-        return [max(0, target) for target in targets]
-    return [0 for _target in targets]
+    if previous_targets is None or all(target is None for target in previous_targets):
+        correction_per_battery = correction / len(current_outputs)
+        initial_targets = [
+            max(-max_power, min(max_power, round(output + correction_per_battery)))
+            for output in current_outputs
+        ]
+        initial_aggregate = sum(current_outputs) + correction
+        if initial_aggregate < 0:
+            return [min(0, target) for target in initial_targets]
+        if initial_aggregate > 0:
+            return [max(0, target) for target in initial_targets]
+        return [0 for _target in initial_targets]
+
+    aggregate_target = max(
+        -len(current_outputs) * max_power,
+        min(len(current_outputs) * max_power, sum(current_outputs) + correction),
+    )
+    if aggregate_target == 0:
+        return [0 for _output in current_outputs]
+
+    direction = -1 if aggregate_target < 0 else 1
+    candidates = list(range(len(current_outputs)))
+    if previous_targets is not None:
+        responsive: list[int] = []
+        for index, (output, previous) in enumerate(
+            zip(current_outputs, previous_targets, strict=True)
+        ):
+            if not battery_is_constrained(output, previous, direction, deadband):
+                responsive.append(index)
+        # Keep probing all batteries if none responded; firmware may simply be
+        # ramping, or every battery may currently be at its SOC boundary.
+        if responsive:
+            candidates = responsive
+
+    targets = [0.0 for _output in current_outputs]
+    for index in candidates:
+        targets[index] = max(0.0, direction * current_outputs[index]) * direction
+
+    remaining = aggregate_target - sum(targets)
+    adjustable = set(candidates)
+    while adjustable and abs(remaining) >= 0.5:
+        share = remaining / len(adjustable)
+        changed = 0.0
+        saturated: set[int] = set()
+        for index in adjustable:
+            proposed = targets[index] + share
+            bounded = max(-max_power, min(max_power, proposed))
+            bounded = min(0.0, bounded) if direction < 0 else max(0.0, bounded)
+            changed += bounded - targets[index]
+            targets[index] = bounded
+            if abs(bounded) >= max_power:
+                saturated.add(index)
+        remaining -= changed
+        adjustable -= saturated
+        if abs(changed) < 0.5:
+            break
+
+    return [round(target) for target in targets]
 
 
 def distribute_target(
@@ -395,6 +466,7 @@ def run(args: argparse.Namespace) -> int:
         minimum_request_gap=args.api_request_gap,
     )
     failures = 0
+    previous_targets: dict[tuple[str, str], int] = {}
     additional_batteries: list[tuple[str, str]] = []
     batteries: list[tuple[str, str]] = []
 
@@ -480,6 +552,7 @@ def run(args: argparse.Namespace) -> int:
                         args.deadband,
                         args.max_power,
                         args.feedback_gain,
+                        [previous_targets.get(battery) for battery in active_batteries],
                     )
                 else:
                     target = calculate_target(p_grid, args.deadband, total_limit)
@@ -488,8 +561,11 @@ def run(args: argparse.Namespace) -> int:
                     )
 
                 accepted_batteries: list[tuple[str, str]] = []
-                for (battery_ip, battery_id), battery_target in zip(
-                    active_batteries, targets, strict=True
+                target_direction = (
+                    -1 if sum(targets) < 0 else 1 if sum(targets) > 0 else 0
+                )
+                for (battery_ip, battery_id), battery_target, current_output in zip(
+                    active_batteries, targets, current_outputs, strict=True
                 ):
                     try:
                         if len(batteries) == 1:
@@ -519,6 +595,14 @@ def run(args: argparse.Namespace) -> int:
                         )
                         continue
                     accepted_batteries.append((battery_ip, battery_id))
+                    battery = (battery_ip, battery_id)
+                    if not battery_is_constrained(
+                        current_output,
+                        previous_targets.get(battery),
+                        target_direction,
+                        args.deadband,
+                    ):
+                        previous_targets[battery] = battery_target
                 if not accepted_batteries:
                     raise RuntimeError("ES.SetMode failed for every available battery")
                 LOGGER.info(
