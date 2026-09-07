@@ -31,6 +31,7 @@ GET_MODE_METHOD = "ES.GetMode"
 VALID_MODES = {"auto", "ai", "manual", "passive", "ups"}
 MIN_REQUEST_GAP = 10.0
 REQUEST_ATTEMPTS = 3
+MIN_CONSTRAINT_TARGET_W = 500
 
 
 class FroniusReadError(RuntimeError):
@@ -80,7 +81,7 @@ def battery_is_constrained(
     if previous_target is None or direction == 0:
         return False
     return (
-        previous_target * direction > deadband
+        previous_target * direction >= max(MIN_CONSTRAINT_TARGET_W, deadband * 4)
         and abs(current_output) < abs(previous_target) * 0.5
     )
 

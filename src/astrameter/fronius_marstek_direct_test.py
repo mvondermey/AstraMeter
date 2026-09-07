@@ -109,6 +109,7 @@ def test_constrained_battery_stays_excluded_until_direction_changes() -> None:
     assert battery_is_constrained(0, -1000, -1, 50)
     assert not battery_is_constrained(0, -1000, 1, 50)
     assert not battery_is_constrained(-600, -1000, -1, 50)
+    assert not battery_is_constrained(-46, -107, -1, 50)
 
 
 def test_calculate_feedback_targets_does_not_assume_saturation_without_history() -> (

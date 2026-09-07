@@ -55,8 +55,8 @@ aggregate charge or discharge direction, so batteries do not work against each
 other. Status reads and commands are sent concurrently to the configured
 batteries through response-ID-aware UDP channels, so adding a battery does not
 serialize another full API delay into every control cycle. If a battery
-delivers less than half of its previous substantial command because it is full,
-empty, or otherwise constrained, its unused share is moved to responsive
+delivers less than half of a previous command of at least 500 W because it is
+full, empty, or otherwise constrained, its unused share is moved to responsive
 batteries on the next cycle. If one battery stops answering, reachable batteries
 continue operating and the unavailable battery is retried on the next cycle:
 
