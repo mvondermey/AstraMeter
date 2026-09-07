@@ -146,30 +146,18 @@ def calculate_feedback_targets(
         if responsive:
             candidates = responsive
 
-    targets = [0.0 for _output in current_outputs]
-    for index in candidates:
-        targets[index] = max(0.0, direction * current_outputs[index]) * direction
-
-    remaining = aggregate_target - sum(targets)
-    adjustable = set(candidates)
-    while adjustable and abs(remaining) >= 0.5:
-        share = remaining / len(adjustable)
-        changed = 0.0
-        saturated: set[int] = set()
-        for index in adjustable:
-            proposed = targets[index] + share
-            bounded = max(-max_power, min(max_power, proposed))
-            bounded = min(0.0, bounded) if direction < 0 else max(0.0, bounded)
-            changed += bounded - targets[index]
-            targets[index] = bounded
-            if abs(bounded) >= max_power:
-                saturated.add(index)
-        remaining -= changed
-        adjustable -= saturated
-        if abs(changed) < 0.5:
-            break
-
-    return [round(target) for target in targets]
+    # Rebalance the complete aggregate target on every established feedback
+    # cycle.  Using each battery's current output as its baseline would only
+    # distribute the latest grid correction.  After a temporarily unavailable
+    # battery returned, that left the surviving battery carrying all power and
+    # the recovered battery permanently at zero.
+    targets = [0 for _output in current_outputs]
+    candidate_targets = distribute_target(
+        round(aggregate_target), len(candidates), max_power
+    )
+    for index, target in zip(candidates, candidate_targets, strict=True):
+        targets[index] = target
+    return targets
 
 
 def distribute_target(

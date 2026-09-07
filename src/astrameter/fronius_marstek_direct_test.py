@@ -121,6 +121,17 @@ def test_calculate_feedback_targets_does_not_assume_saturation_without_history()
     ]
 
 
+def test_calculate_feedback_targets_rebalances_established_batteries() -> None:
+    assert calculate_feedback_targets(
+        -27,
+        [1517, 0],
+        50,
+        2500,
+        0.5,
+        previous_targets=[1517, 0],
+    ) == [759, 758]
+
+
 def test_run_uses_closed_loop_feedback_when_meter_sees_battery(
     tmp_path, monkeypatch
 ) -> None:
