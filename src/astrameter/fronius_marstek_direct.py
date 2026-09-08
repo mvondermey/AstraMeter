@@ -728,7 +728,14 @@ def run(args: argparse.Namespace) -> int:
                             status,
                         )
                         continue
-                    active_batteries.append((battery_ip, battery_id))
+                    battery = (battery_ip, battery_id)
+                    # A temporary firmware fallback to Manual invalidates the
+                    # last Passive command.  Keeping that stale command would
+                    # classify the recovered battery as constrained and leave
+                    # it at 0 W while its peer remains saturated.
+                    if str(status.get("mode", "")).lower() != "passive":
+                        previous_targets.pop(battery, None)
+                    active_batteries.append(battery)
                     mode_statuses.append(status)
                 if not active_batteries:
                     raise RuntimeError("ES.GetMode failed for every configured battery")

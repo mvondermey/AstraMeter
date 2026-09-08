@@ -132,6 +132,17 @@ def test_calculate_feedback_targets_rebalances_established_batteries() -> None:
     ) == [759, 758]
 
 
+def test_calculate_feedback_targets_rebalances_battery_with_reset_history() -> None:
+    assert calculate_feedback_targets(
+        560,
+        [0, 2492],
+        50,
+        2500,
+        0.5,
+        previous_targets=[None, 2500],
+    ) == [1386, 1386]
+
+
 def test_run_uses_closed_loop_feedback_when_meter_sees_battery(
     tmp_path, monkeypatch
 ) -> None:
