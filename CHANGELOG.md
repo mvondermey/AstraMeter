@@ -4,7 +4,7 @@
 
 - Allow the direct Fronius controller to coordinate multiple Marstek batteries in one aggregate feedback loop, communicate with them concurrently on shared or separate API ports for faster reactions, avoid charging one while another discharges, hand unused power from a full or empty battery directly to a responsive one, keep reachable batteries operating when another stops responding, and return a battery that briefly falls back to Manual mode to its balanced share.
 
-- **Fixed** direct Windows operation and Fronius load-position meter feedback by including the Marstek's locally reported AC power, allowing phase diagnosis to see the battery's test pulse, automatically recovering from a stalled local battery connection, and documenting resilient Windows startup that survives power-source changes and restarts failures.
+- **Fixed** direct Windows operation and Fronius load-position meter feedback by including the Marstek's locally reported AC power, allowing phase diagnosis to see the battery's test pulse, automatically recovering from a stalled local battery connection, accepting slow Marstek replies that arrive after a retry was sent instead of discarding them, and documenting resilient Windows startup that survives power-source changes and restarts failures.
 
 ## 2.2.4
 

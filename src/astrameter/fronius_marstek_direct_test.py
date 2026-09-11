@@ -875,6 +875,114 @@ def test_request_recreates_socket_after_all_attempts_timeout(
     assert len(sockets) == 2
 
 
+def test_request_accepts_late_reply_to_earlier_attempt(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    client = MarstekClient(
+        "5037cd7f1d02",
+        30000,
+        state_file,
+        minimum_request_gap=0,
+        request_attempts=3,
+    )
+    sent: list[dict[str, object]] = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.receive_calls = 0
+
+        def bind(self, address):
+            pass
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendto(self, message, destination):
+            sent.append(direct.json.loads(message))
+
+        def recvfrom(self, size):
+            self.receive_calls += 1
+            if self.receive_calls == 1:
+                raise TimeoutError
+            # The battery answers the first attempt only after the retry
+            # has already been sent.
+            response = direct.json.dumps({"id": sent[0]["id"], "result": {"id": 0}})
+            return response.encode(), ("192.168.1.95", 30000)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(direct.socket, "socket", lambda *args: FakeSocket())
+
+    reply = client.request("ES.GetMode", {"id": 0})
+
+    assert reply["id"] == sent[0]["id"]
+    assert len(sent) == 2
+
+
+def test_request_many_accepts_late_reply_to_earlier_attempt(
+    tmp_path, monkeypatch
+) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    client = MarstekClient(
+        "5037cd7f1d02",
+        30000,
+        state_file,
+        minimum_request_gap=0,
+        request_attempts=2,
+    )
+    sent: list[tuple[dict[str, object], tuple[str, int]]] = []
+
+    class FakeSocket:
+        def __init__(self):
+            self.receive_calls = 0
+
+        def bind(self, address):
+            pass
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendto(self, message, destination):
+            sent.append((direct.json.loads(message), destination))
+
+        def recvfrom(self, size):
+            self.receive_calls += 1
+            if self.receive_calls == 1:
+                # First attempt: only .95 answers in time.
+                message, destination = sent[0]
+                response = direct.json.dumps({"id": message["id"], "result": {}})
+                return response.encode(), destination
+            if self.receive_calls == 2:
+                raise TimeoutError
+            # Second attempt: .91 answers the *first* attempt's request id.
+            assert len(sent) == 3
+            message, destination = sent[1]
+            response = direct.json.dumps({"id": message["id"], "result": {}})
+            return response.encode(), destination
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(direct.socket, "socket", lambda *args: FakeSocket())
+
+    replies = client.request_many(
+        "ES.GetMode",
+        [
+            ("192.168.1.95", {"id": 0}),
+            ("192.168.1.91", {"id": 0}),
+        ],
+    )
+
+    assert [reply["id"] for reply in replies if isinstance(reply, dict)] == [1, 2]
+    assert [destination[0] for _message, destination in sent] == [
+        "192.168.1.95",
+        "192.168.1.91",
+        "192.168.1.91",
+    ]
+
+
 def test_extract_p_grid() -> None:
     payload = {
         "Head": {"Status": {"Code": 0}},

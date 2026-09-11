@@ -281,6 +281,11 @@ class MarstekClient:
             raise ConnectionError("Marstek IP is not known")
         if self.request_attempts < 1:
             raise ValueError("request_attempts must be at least 1")
+        # Every attempt carries the same method and params, so a reply to an
+        # earlier attempt of this call is still a valid answer.  A Venus E
+        # often answers later than the socket timeout; accepting the late
+        # reply avoids discarding it and re-sending yet another request.
+        sent_at: dict[int, float] = {}
         for attempt in range(1, self.request_attempts + 1):
             delay = required_request_delay(
                 self._last_request_finished,
@@ -297,10 +302,22 @@ class MarstekClient:
             try:
                 sock = self._get_socket()
                 sock.sendto(message, (destination, self.port))
+                sent_at[request_id] = time.monotonic()
                 while True:
                     data, _address = sock.recvfrom(65535)
                     payload = json.loads(data.decode("utf-8"))
-                    if payload.get("id") == request_id:
+                    response_id = payload.get("id")
+                    if response_id == request_id:
+                        return payload
+                    if response_id in sent_at:
+                        LOGGER.info(
+                            "%s to %s answered late after %.1fs (attempt %d/%d)",
+                            method,
+                            destination,
+                            time.monotonic() - sent_at[response_id],
+                            attempt,
+                            self.request_attempts,
+                        )
                         return payload
             except TimeoutError:
                 if attempt >= self.request_attempts:
@@ -337,6 +354,9 @@ class MarstekClient:
 
         results: list[dict[str, Any] | Exception | None] = [None] * len(requests)
         pending = set(range(len(requests)))
+        # Request ids stay valid across attempts: a late reply to an earlier
+        # attempt answers the same method and params for the same battery.
+        request_ids: dict[int, tuple[int, str, int, float]] = {}
         for attempt in range(1, self.request_attempts + 1):
             delay = required_request_delay(
                 self._last_request_finished,
@@ -347,7 +367,6 @@ class MarstekClient:
                 time.sleep(delay)
 
             sock = self._get_socket()
-            request_ids: dict[int, tuple[int, str]] = {}
             for index in tuple(pending):
                 target, params = requests[index]
                 request_id = self._next_id()
@@ -357,13 +376,13 @@ class MarstekClient:
                 ).encode()
                 try:
                     sock.sendto(message, (target, self.port))
-                    request_ids[request_id] = (index, target)
+                    request_ids[request_id] = (index, target, attempt, time.monotonic())
                 except OSError as exc:
                     results[index] = exc
                     pending.remove(index)
 
             deadline = time.monotonic() + self.timeout
-            while request_ids and time.monotonic() < deadline:
+            while pending and time.monotonic() < deadline:
                 sock.settimeout(max(0.01, deadline - time.monotonic()))
                 try:
                     data, address = sock.recvfrom(65535)
@@ -379,10 +398,20 @@ class MarstekClient:
                 match = request_ids.get(response_id)
                 if match is None or address[0] != match[1]:
                     continue
-                index, _target = match
+                index, target, sent_attempt, sent_time = match
+                if index not in pending:
+                    continue
+                if sent_attempt < attempt:
+                    LOGGER.info(
+                        "%s to %s answered late after %.1fs (attempt %d/%d)",
+                        method,
+                        target,
+                        time.monotonic() - sent_time,
+                        attempt,
+                        self.request_attempts,
+                    )
                 results[index] = payload
                 pending.remove(index)
-                del request_ids[response_id]
 
             sock.settimeout(self.timeout)
             self._last_request_finished = time.monotonic()
