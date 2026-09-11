@@ -35,6 +35,10 @@ repeated after a UDP timeout before that battery is skipped for the cycle
 (default 3). Each additional attempt extends a failing cycle by the socket
 timeout plus one request gap, and the other batteries wait for that result.
 
+`--api-timeout` sets how long one UDP call waits for the battery reply (default
+1.5 seconds). A longer timeout lets a slow but reachable Venus answer without
+a retry, at the cost of a slower reaction to a genuinely lost packet.
+
 The controller does not impose its own SOC, depth-of-discharge, backup, grid,
 or protection limits. Those remain under the Marstek battery firmware and app
 configuration. Reported SOC is validated and logged, but never changes the

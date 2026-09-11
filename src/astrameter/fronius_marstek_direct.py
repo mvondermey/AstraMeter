@@ -31,6 +31,7 @@ GET_MODE_METHOD = "ES.GetMode"
 VALID_MODES = {"auto", "ai", "manual", "passive", "ups"}
 MIN_REQUEST_GAP = 10.0
 REQUEST_ATTEMPTS = 3
+REQUEST_TIMEOUT = 1.5
 MIN_CONSTRAINT_TARGET_W = 500
 
 
@@ -223,7 +224,7 @@ class MarstekClient:
         device_id: str,
         port: int,
         state_file: Path,
-        timeout: float = 1.5,
+        timeout: float = REQUEST_TIMEOUT,
         minimum_request_gap: float = MIN_REQUEST_GAP,
         request_attempts: int = REQUEST_ATTEMPTS,
     ) -> None:
@@ -590,6 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--api-request-gap", type=float, default=MIN_REQUEST_GAP)
     parser.add_argument("--api-request-attempts", type=int, default=REQUEST_ATTEMPTS)
+    parser.add_argument("--api-timeout", type=float, default=REQUEST_TIMEOUT)
     parser.add_argument("--deadband", type=int, default=50)
     parser.add_argument("--max-power", type=int, default=2500)
     parser.add_argument("--command-ttl", type=int, default=45)
@@ -627,14 +629,28 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("--api-request-gap must be greater than zero")
     if args.api_request_attempts < 1:
         raise ValueError("--api-request-attempts must be at least one")
+    if not math.isfinite(args.api_timeout) or args.api_timeout <= 0:
+        raise ValueError("--api-timeout must be greater than zero")
     if not 0 < args.feedback_gain <= 1:
         raise ValueError("--feedback-gain must be greater than zero and at most one")
+    worst_case_cycle = (
+        2 * args.api_request_attempts * (args.api_timeout + args.api_request_gap)
+    )
+    if worst_case_cycle > args.command_ttl:
+        LOGGER.warning(
+            "Retry budget of %.1fs per cycle exceeds --command-ttl %ds; "
+            "a battery that stays unreachable may fall back to firmware control "
+            "before the next accepted setpoint",
+            worst_case_cycle,
+            args.command_ttl,
+        )
     client = MarstekClient(
         args.device_id,
         args.port,
         args.state_file,
         minimum_request_gap=args.api_request_gap,
         request_attempts=args.api_request_attempts,
+        timeout=args.api_timeout,
     )
     failures = 0
     previous_targets: dict[tuple[str, str], int] = {}
@@ -676,6 +692,7 @@ def run(args: argparse.Namespace) -> int:
                 args.state_file,
                 minimum_request_gap=args.api_request_gap,
                 request_attempts=args.api_request_attempts,
+                timeout=args.api_timeout,
             )
     for index, (battery_ip, battery_id) in enumerate(batteries):
         battery_port = battery_ports[(battery_ip, battery_id)]

@@ -720,6 +720,77 @@ def test_api_request_attempts_flag_configures_client(tmp_path, monkeypatch) -> N
     assert direct.build_parser().parse_args([]).api_request_attempts == 3
 
 
+def test_run_rejects_nonpositive_api_timeout(tmp_path) -> None:
+    args = direct.build_parser().parse_args(
+        [
+            "--api-timeout",
+            "0",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="greater than zero"):
+        direct.run(args)
+
+
+def test_api_timeout_flag_configures_client(tmp_path, monkeypatch) -> None:
+    created: list[MarstekClient] = []
+    original = direct.MarstekClient
+
+    def recording_client(*args, **kwargs):
+        client = original(*args, **kwargs)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(direct, "MarstekClient", recording_client)
+    args = direct.build_parser().parse_args(
+        [
+            "--api-timeout",
+            "2.5",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+
+    with pytest.raises(ConnectionError, match="state file is empty"):
+        direct.run(args)
+
+    assert [client.timeout for client in created] == [2.5]
+    assert direct.build_parser().parse_args([]).api_timeout == 1.5
+
+
+def test_run_warns_when_retry_budget_exceeds_command_ttl(tmp_path, caplog) -> None:
+    args = direct.build_parser().parse_args(
+        [
+            "--api-request-attempts",
+            "5",
+            "--api-timeout",
+            "2.5",
+            "--api-request-gap",
+            "2.5",
+            "--command-ttl",
+            "45",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+
+    with (
+        caplog.at_level("WARNING", logger="astrameter.direct"),
+        pytest.raises(ConnectionError, match="state file is empty"),
+    ):
+        direct.run(args)
+
+    assert "exceeds --command-ttl 45s" in caplog.text
+
+
 def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:
     state_file = tmp_path / "ip"
     state_file.write_text("192.168.1.95", encoding="utf-8")
