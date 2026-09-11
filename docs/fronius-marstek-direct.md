@@ -30,6 +30,11 @@ stable wired-Ethernet path has been verified. Because each control cycle sends
 one `ES.GetMode` followed by one `ES.SetMode`, a 2.5-second request gap produces
 an approximately 5-second setpoint refresh. Keep the default on Wi-Fi.
 
+`--api-request-attempts` sets how often one `ES.GetMode` or `ES.SetMode` call is
+repeated after a UDP timeout before that battery is skipped for the cycle
+(default 3). Each additional attempt extends a failing cycle by the socket
+timeout plus one request gap, and the other batteries wait for that result.
+
 The controller does not impose its own SOC, depth-of-discharge, backup, grid,
 or protection limits. Those remain under the Marstek battery firmware and app
 configuration. Reported SOC is validated and logged, but never changes the

@@ -676,6 +676,50 @@ def test_run_rejects_nonpositive_api_request_gap(tmp_path) -> None:
         direct.run(args)
 
 
+def test_run_rejects_zero_api_request_attempts(tmp_path) -> None:
+    args = direct.build_parser().parse_args(
+        [
+            "--api-request-attempts",
+            "0",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="at least one"):
+        direct.run(args)
+
+
+def test_api_request_attempts_flag_configures_client(tmp_path, monkeypatch) -> None:
+    created: list[MarstekClient] = []
+    original = direct.MarstekClient
+
+    def recording_client(*args, **kwargs):
+        client = original(*args, **kwargs)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(direct, "MarstekClient", recording_client)
+    args = direct.build_parser().parse_args(
+        [
+            "--api-request-attempts",
+            "5",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+
+    with pytest.raises(ConnectionError, match="state file is empty"):
+        direct.run(args)
+
+    assert [client.request_attempts for client in created] == [5]
+    assert direct.build_parser().parse_args([]).api_request_attempts == 3
+
+
 def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:
     state_file = tmp_path / "ip"
     state_file.write_text("192.168.1.95", encoding="utf-8")

@@ -589,6 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--api-request-gap", type=float, default=MIN_REQUEST_GAP)
+    parser.add_argument("--api-request-attempts", type=int, default=REQUEST_ATTEMPTS)
     parser.add_argument("--deadband", type=int, default=50)
     parser.add_argument("--max-power", type=int, default=2500)
     parser.add_argument("--command-ttl", type=int, default=45)
@@ -624,6 +625,8 @@ def run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     if args.api_request_gap <= 0:
         raise ValueError("--api-request-gap must be greater than zero")
+    if args.api_request_attempts < 1:
+        raise ValueError("--api-request-attempts must be at least one")
     if not 0 < args.feedback_gain <= 1:
         raise ValueError("--feedback-gain must be greater than zero and at most one")
     client = MarstekClient(
@@ -631,6 +634,7 @@ def run(args: argparse.Namespace) -> int:
         args.port,
         args.state_file,
         minimum_request_gap=args.api_request_gap,
+        request_attempts=args.api_request_attempts,
     )
     failures = 0
     previous_targets: dict[tuple[str, str], int] = {}
@@ -671,6 +675,7 @@ def run(args: argparse.Namespace) -> int:
                 battery_port,
                 args.state_file,
                 minimum_request_gap=args.api_request_gap,
+                request_attempts=args.api_request_attempts,
             )
     for index, (battery_ip, battery_id) in enumerate(batteries):
         battery_port = battery_ports[(battery_ip, battery_id)]
