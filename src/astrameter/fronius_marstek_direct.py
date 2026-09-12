@@ -32,6 +32,7 @@ VALID_MODES = {"auto", "ai", "manual", "passive", "ups"}
 MIN_REQUEST_GAP = 10.0
 REQUEST_ATTEMPTS = 3
 REQUEST_TIMEOUT = 1.5
+FRONIUS_TIMEOUT = 3.0
 MIN_CONSTRAINT_TARGET_W = 500
 
 
@@ -188,6 +189,29 @@ def required_request_delay(
     if last_finished <= 0:
         return 0.0
     return max(0.0, minimum_gap - (now - last_finished))
+
+
+def required_command_ttl(
+    command_ttl: int,
+    attempts: int,
+    timeout: float,
+    request_gap: float,
+    interval: float,
+    fronius_timeout: float = FRONIUS_TIMEOUT,
+) -> int:
+    """Return a Passive command duration that outlives one fully lost cycle.
+
+    Between two accepted ``ES.SetMode`` calls the worst case is one cycle in
+    which both the ``ES.GetMode`` and the ``ES.SetMode`` call use every retry,
+    framed by the control interval on both sides and one Fronius read.  Each
+    attempt waits the socket timeout; a retry is paced from the send time of
+    the unanswered attempt, so it only adds the part of the request gap the
+    timeout has not covered.  The configured TTL stays the floor.
+    """
+    retry_pause = max(0.0, request_gap - timeout)
+    worst_case_call = attempts * timeout + (attempts - 1) * retry_pause
+    needed = 2 * worst_case_call + 2 * interval + fronius_timeout
+    return max(command_ttl, math.ceil(needed))
 
 
 def extract_p_grid(payload: dict[str, Any]) -> float:
@@ -568,7 +592,7 @@ class MarstekClient:
         return results
 
 
-def read_fronius(host: str, timeout: float = 3.0) -> float:
+def read_fronius(host: str, timeout: float = FRONIUS_TIMEOUT) -> float:
     url = f"http://{host}/solar_api/v1/GetPowerFlowRealtimeData.fcgi"
     with urllib.request.urlopen(url, timeout=timeout) as response:
         payload = json.load(response)
@@ -647,22 +671,19 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("--api-timeout must be greater than zero")
     if not 0 < args.feedback_gain <= 1:
         raise ValueError("--feedback-gain must be greater than zero and at most one")
-    # Each attempt waits the socket timeout; a retry is paced from the send
-    # time of the unanswered attempt, so it only adds the part of the request
-    # gap that the timeout has not already covered.
-    retry_pause = max(0.0, args.api_request_gap - args.api_timeout)
-    worst_case_call = (
-        args.api_request_attempts * args.api_timeout
-        + (args.api_request_attempts - 1) * retry_pause
+    command_ttl = required_command_ttl(
+        args.command_ttl,
+        args.api_request_attempts,
+        args.api_timeout,
+        args.api_request_gap,
+        args.interval,
     )
-    worst_case_cycle = 2 * worst_case_call
-    if worst_case_cycle > args.command_ttl:
+    if command_ttl != args.command_ttl:
         LOGGER.warning(
-            "Retry budget of %.1fs per cycle exceeds --command-ttl %ds; "
-            "a battery that stays unreachable may fall back to firmware control "
-            "before the next accepted setpoint",
-            worst_case_cycle,
+            "Raising Passive command duration from --command-ttl %ds to %ds so "
+            "one fully retried control cycle cannot outlive the last setpoint",
             args.command_ttl,
+            command_ttl,
         )
     client = MarstekClient(
         args.device_id,
@@ -836,7 +857,7 @@ def run(args: argparse.Namespace) -> int:
                 if len(batteries) == 1:
                     try:
                         set_results: list[bool | Exception] = [
-                            client.set_passive(targets[0], args.command_ttl)
+                            client.set_passive(targets[0], command_ttl)
                         ]
                     except (OSError, ValueError, json.JSONDecodeError) as exc:
                         set_results = [exc]
@@ -861,7 +882,7 @@ def run(args: argparse.Namespace) -> int:
                                     battery[0],
                                     battery[1],
                                     battery_target,
-                                    args.command_ttl,
+                                    command_ttl,
                                 )
                                 for _index, battery, battery_target in members
                             ],
@@ -880,7 +901,7 @@ def run(args: argparse.Namespace) -> int:
                 else:
                     set_results = client.set_passives(
                         [
-                            (battery_ip, battery_id, battery_target, args.command_ttl)
+                            (battery_ip, battery_id, battery_target, command_ttl)
                             for (battery_ip, battery_id), battery_target in zip(
                                 active_batteries, targets, strict=True
                             )

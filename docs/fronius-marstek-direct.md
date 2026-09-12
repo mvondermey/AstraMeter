@@ -41,6 +41,12 @@ batteries wait for that result.
 1.5 seconds). A longer timeout lets a slow but reachable Venus answer without
 a retry, at the cost of a slower reaction to a genuinely lost packet.
 
+`--command-ttl` is the floor for the Passive command duration. The controller
+raises it automatically when one fully retried control cycle (both calls using
+every attempt, framed by the control interval and one Fronius read) would take
+longer, and logs the raised value at startup, so a battery that recovers after
+a burst of lost packets is still holding the last setpoint.
+
 The controller does not impose its own SOC, depth-of-discharge, backup, grid,
 or protection limits. Those remain under the Marstek battery firmware and app
 configuration. Reported SOC is validated and logged, but never changes the

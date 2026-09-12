@@ -14,8 +14,13 @@ from .fronius_marstek_direct import (
     device_matches,
     distribute_target,
     extract_p_grid,
+    required_command_ttl,
     required_request_delay,
 )
+
+# With the parser defaults (3 attempts x 1.5 s, 10 s request gap, 5 s interval)
+# one fully retried cycle needs 56 s, so run() raises the 45 s command TTL.
+DEFAULT_COMMAND_TTL = required_command_ttl(45, 3, 1.5, 10.0, 5.0)
 
 
 def test_calculate_target_sign_deadband_and_limit() -> None:
@@ -203,7 +208,11 @@ def test_run_uses_closed_loop_feedback_when_meter_sees_battery(
     monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
 
     assert direct.run(args) == 0
-    assert set_calls == [(-2500, 45), (-500, 45), (0, 10)]
+    assert set_calls == [
+        (-2500, DEFAULT_COMMAND_TTL),
+        (-500, DEFAULT_COMMAND_TTL),
+        (0, 10),
+    ]
 
 
 def test_run_applies_grid_target_independently_of_reported_soc(
@@ -265,7 +274,11 @@ def test_run_applies_grid_target_independently_of_reported_soc(
     monkeypatch.setattr(direct.time, "sleep", lambda _seconds: None)
 
     assert direct.run(args) == 0
-    assert set_calls == [(600, 45), (-400, 45), (0, 10)]
+    assert set_calls == [
+        (600, DEFAULT_COMMAND_TTL),
+        (-400, DEFAULT_COMMAND_TTL),
+        (0, 10),
+    ]
 
 
 def test_run_aggregates_and_splits_two_batteries(tmp_path, monkeypatch) -> None:
@@ -349,8 +362,8 @@ def test_run_aggregates_and_splits_two_batteries(tmp_path, monkeypatch) -> None:
 
     assert direct.run(args) == 0
     assert set_calls == [
-        ("192.168.1.95", 1250, 45),
-        ("192.168.1.91", 750, 45),
+        ("192.168.1.95", 1250, DEFAULT_COMMAND_TTL),
+        ("192.168.1.91", 750, DEFAULT_COMMAND_TTL),
         ("192.168.1.95", 0, 10),
         ("192.168.1.91", 0, 10),
     ]
@@ -422,8 +435,8 @@ def test_run_uses_independent_clients_for_different_battery_ports(
     assert direct.run(args) == 0
     assert sorted(set_calls) == sorted(
         [
-            (30001, "192.168.1.95", 1250, 45),
-            (30000, "192.168.1.91", 750, 45),
+            (30001, "192.168.1.95", 1250, DEFAULT_COMMAND_TTL),
+            (30000, "192.168.1.91", 750, DEFAULT_COMMAND_TTL),
             (30001, "192.168.1.95", 0, 10),
             (30000, "192.168.1.91", 0, 10),
         ]
@@ -510,7 +523,7 @@ def test_run_continues_with_reachable_battery(tmp_path, monkeypatch) -> None:
 
     assert direct.run(args) == 0
     assert set_calls == [
-        ("192.168.1.91", 1000, 45),
+        ("192.168.1.91", 1000, DEFAULT_COMMAND_TTL),
         ("192.168.1.95", 0, 10),
         ("192.168.1.91", 0, 10),
     ]
@@ -650,7 +663,11 @@ def test_marstek_failure_retries_directly_without_wifi_probe(
     assert ensure_calls == 1
     assert grid_reads == 2
     assert get_mode_calls == 2
-    assert set_calls == [(500, 45), (500, 45), (0, 10)]
+    assert set_calls == [
+        (500, DEFAULT_COMMAND_TTL),
+        (500, DEFAULT_COMMAND_TTL),
+        (0, 10),
+    ]
 
 
 def test_required_request_delay() -> None:
@@ -764,9 +781,23 @@ def test_api_timeout_flag_configures_client(tmp_path, monkeypatch) -> None:
     assert direct.build_parser().parse_args([]).api_timeout == 1.5
 
 
-def test_run_warns_when_retry_budget_exceeds_command_ttl(tmp_path, caplog) -> None:
-    # 10 attempts x 2.5 s timeout, retries paced from the send time: 25 s per
-    # call, 50 s per cycle, above the 45 s command TTL.
+def test_required_command_ttl_keeps_configured_floor() -> None:
+    # 5 attempts x 2.5 s, gap 2.5 s: 12.5 s per call, 25 s per cycle,
+    # plus two 5 s intervals and the 3 s Fronius read = 38 s < 45 s.
+    assert required_command_ttl(45, 5, 2.5, 2.5, 5.0) == 45
+
+
+def test_required_command_ttl_raises_to_cover_retry_budget() -> None:
+    # Retries paced from the end of the wait would have needed 22.5 s per
+    # call; with the gap only adding what the timeout did not cover it is
+    # 5 x 2.5 + 4 x 0 = 12.5 s, but 10 attempts need 25 s per call:
+    # 50 + 10 + 3 = 63 s > 45 s.
+    assert required_command_ttl(45, 10, 2.5, 2.5, 5.0) == 63
+    # Default pacing: 3 x 1.5 s + 2 x (10 - 1.5) s = 21.5 s per call.
+    assert required_command_ttl(45, 3, 1.5, 10.0, 5.0) == 56
+
+
+def test_run_raises_command_ttl_when_retry_budget_exceeds_it(tmp_path, caplog) -> None:
     args = direct.build_parser().parse_args(
         [
             "--api-request-attempts",
@@ -790,12 +821,10 @@ def test_run_warns_when_retry_budget_exceeds_command_ttl(tmp_path, caplog) -> No
     ):
         direct.run(args)
 
-    assert "exceeds --command-ttl 45s" in caplog.text
+    assert "from --command-ttl 45s to 63s" in caplog.text
 
 
-def test_run_does_not_warn_when_retry_budget_fits_command_ttl(tmp_path, caplog) -> None:
-    # 5 attempts x 2.5 s timeout with a 2.5 s gap: 12.5 s per call, 25 s per
-    # cycle, inside the 45 s command TTL.
+def test_run_keeps_command_ttl_when_retry_budget_fits(tmp_path, caplog) -> None:
     args = direct.build_parser().parse_args(
         [
             "--api-request-attempts",
@@ -819,7 +848,7 @@ def test_run_does_not_warn_when_retry_budget_fits_command_ttl(tmp_path, caplog) 
     ):
         direct.run(args)
 
-    assert "exceeds --command-ttl" not in caplog.text
+    assert "Passive command duration" not in caplog.text
 
 
 def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:
