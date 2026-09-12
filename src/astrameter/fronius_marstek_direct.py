@@ -300,6 +300,7 @@ class MarstekClient:
                 {"id": request_id, "method": method, "params": params},
                 separators=(",", ":"),
             ).encode()
+            timed_out = False
             try:
                 sock = self._get_socket()
                 sock.sendto(message, (destination, self.port))
@@ -321,6 +322,7 @@ class MarstekClient:
                         )
                         return payload
             except TimeoutError:
+                timed_out = True
                 if attempt >= self.request_attempts:
                     # A Venus E may stop replying to an otherwise valid,
                     # source-port-pinned UDP socket while remaining reachable
@@ -337,7 +339,14 @@ class MarstekClient:
                     self.request_attempts,
                 )
             finally:
-                self._last_request_finished = time.monotonic()
+                # The socket timeout already kept the battery idle since the
+                # unanswered request was sent, so pace the retry from that
+                # send time instead of adding a full request gap on top.
+                self._last_request_finished = (
+                    sent_at.get(request_id, time.monotonic())
+                    if timed_out
+                    else time.monotonic()
+                )
         raise RuntimeError("unreachable request retry state")
 
     def request_many(
@@ -368,6 +377,7 @@ class MarstekClient:
                 time.sleep(delay)
 
             sock = self._get_socket()
+            attempt_sent_at = time.monotonic()
             for index in tuple(pending):
                 target, params = requests[index]
                 request_id = self._next_id()
@@ -415,7 +425,11 @@ class MarstekClient:
                 pending.remove(index)
 
             sock.settimeout(self.timeout)
-            self._last_request_finished = time.monotonic()
+            # An unanswered battery has been idle since this attempt was sent;
+            # pace the retry from then rather than from the end of the wait.
+            self._last_request_finished = (
+                attempt_sent_at if pending else time.monotonic()
+            )
             if not pending:
                 break
             if attempt < self.request_attempts:
@@ -633,9 +647,15 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("--api-timeout must be greater than zero")
     if not 0 < args.feedback_gain <= 1:
         raise ValueError("--feedback-gain must be greater than zero and at most one")
-    worst_case_cycle = (
-        2 * args.api_request_attempts * (args.api_timeout + args.api_request_gap)
+    # Each attempt waits the socket timeout; a retry is paced from the send
+    # time of the unanswered attempt, so it only adds the part of the request
+    # gap that the timeout has not already covered.
+    retry_pause = max(0.0, args.api_request_gap - args.api_timeout)
+    worst_case_call = (
+        args.api_request_attempts * args.api_timeout
+        + (args.api_request_attempts - 1) * retry_pause
     )
+    worst_case_cycle = 2 * worst_case_call
     if worst_case_cycle > args.command_ttl:
         LOGGER.warning(
             "Retry budget of %.1fs per cycle exceeds --command-ttl %ds; "

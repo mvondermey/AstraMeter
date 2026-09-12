@@ -32,8 +32,10 @@ an approximately 5-second setpoint refresh. Keep the default on Wi-Fi.
 
 `--api-request-attempts` sets how often one `ES.GetMode` or `ES.SetMode` call is
 repeated after a UDP timeout before that battery is skipped for the cycle
-(default 3). Each additional attempt extends a failing cycle by the socket
-timeout plus one request gap, and the other batteries wait for that result.
+(default 3). A retry is sent once the request gap has passed since the
+unanswered request went out, so each additional attempt extends a failing
+cycle by the larger of the socket timeout and the request gap, and the other
+batteries wait for that result.
 
 `--api-timeout` sets how long one UDP call waits for the battery reply (default
 1.5 seconds). A longer timeout lets a slow but reachable Venus answer without

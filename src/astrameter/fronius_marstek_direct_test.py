@@ -765,6 +765,37 @@ def test_api_timeout_flag_configures_client(tmp_path, monkeypatch) -> None:
 
 
 def test_run_warns_when_retry_budget_exceeds_command_ttl(tmp_path, caplog) -> None:
+    # 10 attempts x 2.5 s timeout, retries paced from the send time: 25 s per
+    # call, 50 s per cycle, above the 45 s command TTL.
+    args = direct.build_parser().parse_args(
+        [
+            "--api-request-attempts",
+            "10",
+            "--api-timeout",
+            "2.5",
+            "--api-request-gap",
+            "2.5",
+            "--command-ttl",
+            "45",
+            "--state-file",
+            str(tmp_path / "ip"),
+            "--log-file",
+            str(tmp_path / "controller.log"),
+        ]
+    )
+
+    with (
+        caplog.at_level("WARNING", logger="astrameter.direct"),
+        pytest.raises(ConnectionError, match="state file is empty"),
+    ):
+        direct.run(args)
+
+    assert "exceeds --command-ttl 45s" in caplog.text
+
+
+def test_run_does_not_warn_when_retry_budget_fits_command_ttl(tmp_path, caplog) -> None:
+    # 5 attempts x 2.5 s timeout with a 2.5 s gap: 12.5 s per call, 25 s per
+    # cycle, inside the 45 s command TTL.
     args = direct.build_parser().parse_args(
         [
             "--api-request-attempts",
@@ -788,7 +819,7 @@ def test_run_warns_when_retry_budget_exceeds_command_ttl(tmp_path, caplog) -> No
     ):
         direct.run(args)
 
-    assert "exceeds --command-ttl 45s" in caplog.text
+    assert "exceeds --command-ttl" not in caplog.text
 
 
 def test_ensure_ip_only_validates_cached_address(tmp_path, monkeypatch) -> None:
@@ -1096,6 +1127,126 @@ def test_request_many_accepts_late_reply_to_earlier_attempt(
         "192.168.1.91",
         "192.168.1.91",
     ]
+
+
+class FakeClock:
+    """Monotonic clock that only advances when the test says so."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def test_request_paces_retry_from_send_time_after_timeout(
+    tmp_path, monkeypatch
+) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    clock = FakeClock()
+    monkeypatch.setattr(direct.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(direct.time, "sleep", clock.sleep)
+    client = MarstekClient(
+        "5037cd7f1d02",
+        30000,
+        state_file,
+        timeout=2.5,
+        minimum_request_gap=2.5,
+        request_attempts=3,
+    )
+    sent: list[dict[str, object]] = []
+
+    class FakeSocket:
+        def bind(self, address):
+            pass
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendto(self, message, destination):
+            sent.append(direct.json.loads(message))
+
+        def recvfrom(self, size):
+            if len(sent) == 1:
+                clock.now += 2.5  # the full socket timeout elapses
+                raise TimeoutError
+            clock.now += 0.2
+            response = direct.json.dumps({"id": sent[-1]["id"], "result": {}})
+            return response.encode(), ("192.168.1.95", 30000)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(direct.socket, "socket", lambda *args: FakeSocket())
+
+    client.request("ES.GetMode", {"id": 0})
+
+    # The 2.5 s timeout already satisfied the 2.5 s request gap, so the
+    # retry went out without an additional pause.
+    assert len(sent) == 2
+    assert clock.sleeps == []
+
+    # A successful reply still paces the next call from the reply time.
+    client.request("ES.GetMode", {"id": 0})
+    assert clock.sleeps == [2.5]
+
+
+def test_request_many_paces_retry_from_send_time_after_timeout(
+    tmp_path, monkeypatch
+) -> None:
+    state_file = tmp_path / "ip"
+    state_file.write_text("192.168.1.95", encoding="utf-8")
+    clock = FakeClock()
+    monkeypatch.setattr(direct.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(direct.time, "sleep", clock.sleep)
+    client = MarstekClient(
+        "5037cd7f1d02",
+        30000,
+        state_file,
+        timeout=2.5,
+        minimum_request_gap=2.5,
+        request_attempts=3,
+    )
+    sent: list[tuple[dict[str, object], tuple[str, int]]] = []
+
+    class FakeSocket:
+        def bind(self, address):
+            pass
+
+        def settimeout(self, timeout):
+            pass
+
+        def sendto(self, message, destination):
+            sent.append((direct.json.loads(message), destination))
+
+        def recvfrom(self, size):
+            if len(sent) == 1:
+                clock.now += 2.5
+                raise TimeoutError
+            clock.now += 0.2
+            message, destination = sent[-1]
+            response = direct.json.dumps({"id": message["id"], "result": {}})
+            return response.encode(), destination
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(direct.socket, "socket", lambda *args: FakeSocket())
+
+    replies = client.request_many("ES.GetMode", [("192.168.1.95", {"id": 0})])
+
+    assert isinstance(replies[0], dict)
+    assert len(sent) == 2
+    assert clock.sleeps == []
+
+    client.request_many("ES.GetMode", [("192.168.1.95", {"id": 0})])
+    assert clock.sleeps == [2.5]
 
 
 def test_extract_p_grid() -> None:
