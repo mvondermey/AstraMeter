@@ -33,6 +33,7 @@ MIN_REQUEST_GAP = 10.0
 REQUEST_ATTEMPTS = 3
 REQUEST_TIMEOUT = 1.5
 FRONIUS_TIMEOUT = 3.0
+COMMAND_TTL_RESERVE = 2.0
 MIN_CONSTRAINT_TARGET_W = 500
 
 
@@ -199,18 +200,27 @@ def required_command_ttl(
     interval: float,
     fronius_timeout: float = FRONIUS_TIMEOUT,
 ) -> int:
-    """Return a Passive command duration that outlives one fully lost cycle.
+    """Return a Passive command duration that outlives two lost retry sets.
 
-    Between two accepted ``ES.SetMode`` calls the worst case is one cycle in
-    which both the ``ES.GetMode`` and the ``ES.SetMode`` call use every retry,
-    framed by the control interval on both sides and one Fronius read.  Each
-    attempt waits the socket timeout; a retry is paced from the send time of
-    the unanswered attempt, so it only adds the part of the request gap the
+    A battery that loses every ``ES.GetMode`` attempt is skipped for that
+    cycle and receives no setpoint; if it then loses every ``ES.SetMode``
+    attempt in the next cycle, the last accepted command has to survive:
+    one control interval, three cycle starts each reading the Fronius, the
+    two fully retried calls, the request gap after each successful
+    ``ES.GetMode`` and a small reserve for the fast calls.  Each attempt
+    waits the socket timeout; a retry is paced from the send time of the
+    unanswered attempt, so it only adds the part of the request gap the
     timeout has not covered.  The configured TTL stays the floor.
     """
     retry_pause = max(0.0, request_gap - timeout)
     worst_case_call = attempts * timeout + (attempts - 1) * retry_pause
-    needed = 2 * worst_case_call + 2 * interval + fronius_timeout
+    needed = (
+        2 * worst_case_call
+        + interval
+        + 3 * fronius_timeout
+        + 2 * request_gap
+        + COMMAND_TTL_RESERVE
+    )
     return max(command_ttl, math.ceil(needed))
 
 
@@ -681,7 +691,8 @@ def run(args: argparse.Namespace) -> int:
     if command_ttl != args.command_ttl:
         LOGGER.warning(
             "Raising Passive command duration from --command-ttl %ds to %ds so "
-            "one fully retried control cycle cannot outlive the last setpoint",
+            "a battery that loses every ES.GetMode retry in one cycle and every "
+            "ES.SetMode retry in the next still holds its last setpoint",
             args.command_ttl,
             command_ttl,
         )

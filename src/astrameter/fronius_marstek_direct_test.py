@@ -19,7 +19,8 @@ from .fronius_marstek_direct import (
 )
 
 # With the parser defaults (3 attempts x 1.5 s, 10 s request gap, 5 s interval)
-# one fully retried cycle needs 56 s, so run() raises the 45 s command TTL.
+# two lost retry sets need 2 x 21.5 + 5 + 9 + 20 + 2 = 79 s, so run() raises
+# the 45 s command TTL.
 DEFAULT_COMMAND_TTL = required_command_ttl(45, 3, 1.5, 10.0, 5.0)
 
 
@@ -782,19 +783,22 @@ def test_api_timeout_flag_configures_client(tmp_path, monkeypatch) -> None:
 
 
 def test_required_command_ttl_keeps_configured_floor() -> None:
-    # 5 attempts x 2.5 s, gap 2.5 s: 12.5 s per call, 25 s per cycle,
-    # plus two 5 s intervals and the 3 s Fronius read = 38 s < 45 s.
-    assert required_command_ttl(45, 5, 2.5, 2.5, 5.0) == 45
+    # 4 attempts x 2.5 s, gap 2.5 s: 10 s per call, 20 s for two lost sets,
+    # plus 5 s interval, 3 x 3 s Fronius, 2 x 2.5 s gap, 2 s reserve = 41 s.
+    assert required_command_ttl(45, 4, 2.5, 2.5, 5.0) == 45
 
 
 def test_required_command_ttl_raises_to_cover_retry_budget() -> None:
     # Retries paced from the end of the wait would have needed 22.5 s per
     # call; with the gap only adding what the timeout did not cover it is
     # 5 x 2.5 + 4 x 0 = 12.5 s, but 10 attempts need 25 s per call:
-    # 50 + 10 + 3 = 63 s > 45 s.
-    assert required_command_ttl(45, 10, 2.5, 2.5, 5.0) == 63
-    # Default pacing: 3 x 1.5 s + 2 x (10 - 1.5) s = 21.5 s per call.
-    assert required_command_ttl(45, 3, 1.5, 10.0, 5.0) == 56
+    # 5 x 2.5 s per call: 25 + 5 + 9 + 5 + 2 = 46 s, just above 45 s.
+    assert required_command_ttl(45, 5, 2.5, 2.5, 5.0) == 46
+    # 10 attempts: 50 + 5 + 9 + 5 + 2 = 71 s.
+    assert required_command_ttl(45, 10, 2.5, 2.5, 5.0) == 71
+    # Default pacing: 3 x 1.5 s + 2 x (10 - 1.5) s = 21.5 s per call,
+    # 43 + 5 + 9 + 20 + 2 = 79 s.
+    assert required_command_ttl(45, 3, 1.5, 10.0, 5.0) == 79
 
 
 def test_run_raises_command_ttl_when_retry_budget_exceeds_it(tmp_path, caplog) -> None:
@@ -821,14 +825,14 @@ def test_run_raises_command_ttl_when_retry_budget_exceeds_it(tmp_path, caplog) -
     ):
         direct.run(args)
 
-    assert "from --command-ttl 45s to 63s" in caplog.text
+    assert "from --command-ttl 45s to 71s" in caplog.text
 
 
 def test_run_keeps_command_ttl_when_retry_budget_fits(tmp_path, caplog) -> None:
     args = direct.build_parser().parse_args(
         [
             "--api-request-attempts",
-            "5",
+            "4",
             "--api-timeout",
             "2.5",
             "--api-request-gap",

@@ -42,10 +42,10 @@ batteries wait for that result.
 a retry, at the cost of a slower reaction to a genuinely lost packet.
 
 `--command-ttl` is the floor for the Passive command duration. The controller
-raises it automatically when one fully retried control cycle (both calls using
-every attempt, framed by the control interval and one Fronius read) would take
-longer, and logs the raised value at startup, so a battery that recovers after
-a burst of lost packets is still holding the last setpoint.
+raises it automatically when a battery that loses every `ES.GetMode` attempt
+in one cycle and every `ES.SetMode` attempt in the next would otherwise outlive
+its last setpoint (two fully retried calls plus the control interval, Fronius
+reads and request gaps around them), and logs the raised value at startup.
 
 The controller does not impose its own SOC, depth-of-discharge, backup, grid,
 or protection limits. Those remain under the Marstek battery firmware and app
