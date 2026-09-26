@@ -18,6 +18,7 @@ from .balancer import (
     BalancerConfig,
     ConsumerMode,
     LoadBalancer,
+    apply_priority_load,
 )
 from .protocol import (
     ETX,
@@ -242,6 +243,9 @@ class CT002:
             Callable[[tuple, list, str], Awaitable[list[float] | None]] | None
         ) = None
         self.event_listener: Callable[[str, str, dict[str, Any]], None] | None = None
+        # Optional priority consumer (e.g. EV charger): returns its current draw
+        # in W. The batteries never discharge into it (apply_priority_load).
+        self.priority_load_watts: Callable[[], float] | None = None
         self._device_id = device_id
         self._consumers: dict[str, Consumer] = {}
         # User-set control state, kept per consumer id so it survives the
@@ -627,6 +631,17 @@ class CT002:
         manual = frozenset(
             cid for cid, c in self._consumers.items() if c.manual_enabled
         )
+
+        if self.priority_load_watts is not None:
+            load = self.priority_load_watts()
+            if load > 0:
+                pool_output = sum(
+                    r["power"]
+                    for cid, r in reports.items()
+                    if cid not in inactive and cid not in manual
+                )
+                total = apply_priority_load(total, pool_output, load)
+                self._last_smooth_target = total
 
         return self._balancer.compute_target(
             consumer_id,

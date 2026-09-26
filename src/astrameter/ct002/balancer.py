@@ -60,6 +60,30 @@ def to_grid_reading(target: NetOutputW, reported: float) -> float:
     return float(target) - reported
 
 
+def apply_priority_load(grid: float, pool_output: float, load: float) -> float:
+    """Keep the batteries from discharging into a priority consumer (e.g. an EV).
+
+    ``grid`` is the metered grid power (+ import), ``pool_output`` the summed
+    output the auto-pool batteries report (+ discharge, - charge) and ``load``
+    the consumer's current draw (>= 0).  The fleet's net-output demand is
+    ``pool_output + grid``:
+
+    * demand <= 0 (surplus after the consumer): unchanged, the batteries only
+      charge from what the consumer leaves over -> the consumer gets solar first;
+    * demand > 0 (discharge wanted): the consumer's share is removed and the
+      demand never drops below 0 -> the batteries serve the house only and the
+      consumer's remainder comes from the grid.
+
+    Returns the grid value the control path should act on.
+    """
+    if load <= 0:
+        return grid
+    demand = pool_output + grid
+    if demand <= 0:
+        return grid
+    return max(grid - load, -pool_output)
+
+
 def _report_weight(report: dict) -> float:
     """Per-battery fair-share weight from a report dict (defaults to 1.0).
 

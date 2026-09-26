@@ -44,6 +44,7 @@ from astrameter.powermeter import (
 )
 from astrameter.powermeter.wrappers.hampel import HampelPowermeter
 from astrameter.powermeter.wrappers.health import HealthTrackingPowermeter
+from astrameter.powermeter.wrappers.priority_load import PriorityLoadPowermeter
 from astrameter.powermeter.wrappers.smoothing import (
     DeadbandPowermeter,
     SmoothedPowermeter,
@@ -205,6 +206,25 @@ def read_all_powermeter_configs(
                     f"Applying power transform (multiplier={multipliers}, offset={offsets}) to {section}"
                 )
                 powermeter = TransformedPowermeter(powermeter, offsets, multipliers)
+
+            load_ip = config.get(
+                section, "PRIORITY_LOAD_SHELLY_IP", fallback=""
+            ).strip()
+            if load_ip:
+                logger.info(
+                    f"Priority load (Shelly Gen2+ {load_ip}) measured with {section}; "
+                    "batteries will not discharge into it"
+                )
+                powermeter = PriorityLoadPowermeter(
+                    powermeter,
+                    ShellyPlus1PM(load_ip, "", "", ""),
+                    min_watts=config.getfloat(
+                        section, "PRIORITY_LOAD_MIN_W", fallback=50.0
+                    ),
+                    max_age=config.getfloat(
+                        section, "PRIORITY_LOAD_MAX_AGE", fallback=2.0
+                    ),
+                )
 
             section_throttle_interval = config.getfloat(
                 section, "THROTTLE_INTERVAL", fallback=global_throttle_interval

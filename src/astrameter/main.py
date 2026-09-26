@@ -33,6 +33,7 @@ from astrameter.mqtt_insights import (
 )
 from astrameter.powermeter import Powermeter
 from astrameter.powermeter.wrappers.health import HealthTrackingPowermeter
+from astrameter.powermeter.wrappers.priority_load import find_priority_load
 from astrameter.shelly import Shelly
 from astrameter.version_info import get_git_commit_sha
 from astrameter.web_server import WebServer
@@ -324,6 +325,15 @@ async def run_device(
             return await read_ct_powermeter(addr, powermeters)
 
         device.before_send = update_readings
+
+        # Priority consumer (e.g. EV via PRIORITY_LOAD_SHELLY_IP): batteries never
+        # discharge into it; it gets solar before the batteries charge.
+        priority = next(
+            (p for p in (find_priority_load(pm) for pm, _, _ in powermeters) if p),
+            None,
+        )
+        if priority is not None:
+            device.priority_load_watts = priority.load_watts
 
         if insights:
 
