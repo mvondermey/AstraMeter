@@ -40,7 +40,7 @@ class PriorityLoadPowermeter(PowermeterWrapper):
         self._load_watts = 0.0
         self._load_at: float | None = None
         self._last_error_log = 0.0
-        # Raw meter status (e.g. Shelly Switch.GetStatus) so other local tools
+        # Raw meter status (e.g. Shelly Switch.GetStatus) so other tools
         # can read the consumer from here instead of polling the meter again.
         self._status: dict | None = None
         # Reliability counters (since start): misses = failed samples, of which

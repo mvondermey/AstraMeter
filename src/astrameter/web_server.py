@@ -118,16 +118,7 @@ class WebServer:
         )
 
     async def _handle_priority_load(self, request):
-        """Return the priority load's last reading and counters at GET /api/priority-load.
-
-        Local callers only: it is meant for a controller on the same host.
-        """
-        if request.remote not in ("127.0.0.1", "::1"):
-            return web.Response(
-                body=b'{"error": "Forbidden"}',
-                status=403,
-                content_type="application/json",
-            )
+        """Return the priority load's last reading and counters at GET /api/priority-load."""
         if self.priority_load_status is None:
             return web.Response(
                 body=b'{"error": "No priority load configured"}',
