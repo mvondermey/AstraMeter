@@ -224,6 +224,9 @@ def read_all_powermeter_configs(
                     max_age=config.getfloat(
                         section, "PRIORITY_LOAD_MAX_AGE", fallback=2.0
                     ),
+                    request_timeout=config.getfloat(
+                        section, "PRIORITY_LOAD_REQUEST_TIMEOUT", fallback=0.8
+                    ),
                 )
 
             section_throttle_interval = config.getfloat(
