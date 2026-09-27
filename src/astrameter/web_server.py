@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import threading
+from collections.abc import Callable
 
 from aiohttp import web
 
@@ -42,6 +43,8 @@ class WebServer:
         self.config_path = config_path
         self.enable_web_config = enable_web_config
         self._runner = None
+        # Set by main once the powermeters exist (PRIORITY_LOAD_SHELLY_IP).
+        self.priority_load_status: Callable[[], dict] | None = None
 
     async def start(self):
         """Bind the TCP port and start serving. Returns True on success, False on failure."""
@@ -49,6 +52,7 @@ class WebServer:
         # aiohttp auto-handles HEAD for GET routes.
         for path in ("/health", "/health/", "/api", "/api/"):
             app.router.add_get(path, self._handle_health)
+        app.router.add_get("/api/priority-load", self._handle_priority_load)
         if self.enable_web_config:
             app.router.add_get("/config", self._handle_config_ui)
             app.router.add_get("/config/", self._handle_config_ui)
@@ -109,6 +113,29 @@ class WebServer:
         )
         return web.Response(
             body=_health_json_bytes(),
+            content_type="application/json",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    async def _handle_priority_load(self, request):
+        """Return the priority load's last reading and counters at GET /api/priority-load.
+
+        Local callers only: it is meant for a controller on the same host.
+        """
+        if request.remote not in ("127.0.0.1", "::1"):
+            return web.Response(
+                body=b'{"error": "Forbidden"}',
+                status=403,
+                content_type="application/json",
+            )
+        if self.priority_load_status is None:
+            return web.Response(
+                body=b'{"error": "No priority load configured"}',
+                status=404,
+                content_type="application/json",
+            )
+        return web.Response(
+            body=json.dumps(self.priority_load_status()).encode("utf-8"),
             content_type="application/json",
             headers={"Cache-Control": "no-cache"},
         )

@@ -626,6 +626,13 @@ async def async_main(
     try:
         # Create powermeters
         powermeters = read_all_powermeter_configs(cfg)
+        if web_server:
+            priority = next(
+                (p for p in (find_priority_load(pm) for pm, _, _ in powermeters) if p),
+                None,
+            )
+            if priority is not None:
+                web_server.priority_load_status = priority.status
 
         # Start powermeter lifecycle
         for pm, _, _ in powermeters:

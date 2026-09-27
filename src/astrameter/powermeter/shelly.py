@@ -63,8 +63,12 @@ class Shelly1PM(Shelly):
 
 
 class ShellyPlus1PM(Shelly):
+    async def get_status(self) -> dict:
+        """Full Switch.GetStatus response (output, apower, errors, source, ...)."""
+        return await self._get_rpc_json("/Switch.GetStatus?id=0")
+
     async def get_powermeter_watts(self) -> list[float]:
-        response = await self._get_rpc_json("/Switch.GetStatus?id=0")
+        response = await self.get_status()
         return [int(response["apower"])]
 
 
